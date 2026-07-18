@@ -396,3 +396,14 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Zig package manager dependencies
+zig-pkg/
+
+# Compiled object files and temporary documents
+*.o
+/docgen_tmp/
