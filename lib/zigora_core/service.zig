@@ -1,5 +1,7 @@
-//! Port of pingora-core's `Service<A>` + `ServerApp` trait. v0.1: type-erased
-//! via vtable, single-threaded accept loop, no listeners-per-fn fanout.
+//! Port of pingora-core's `Service<A>` + `ServerApp` trait. v0.2: the accept
+//! loop spawns one `io.async` per inbound connection on the `std.Io` worker
+//! pool — non-blocking, concurrent. Inflight connections are tracked via a
+//! `Group` so a future graceful shutdown can `group.cancel` them.
 //!
 //! See ARCHITECTURE.md §3 (zigora_core section).
 
@@ -73,14 +75,17 @@ pub const ServiceHandle = struct {
 };
 
 /// `Service<App>` — generic over the user's app type. `startService(io)`
-/// runs the accept loop inline on the calling thread. No threads/DAG
-/// support in v0.1 — each Service blocks until shutdown signal arrives.
+/// accepts connections and hands each off to `io.async` — the caller's
+/// `Io` (Threaded/Uring/Evented) schedules them on its worker pool. Per-
+/// connection futures are tracked in a `Group` so they can be awaited
+/// (or canceled) at shutdown.
 pub fn Service(comptime App: type) type {
     return struct {
         name: []const u8,
         app: App,
         listeners: listeners_mod.Listeners,
         threads: ?usize = null,
+        inflight: Io.Group = .init,
 
         const Self = @This();
 
@@ -92,8 +97,9 @@ pub fn Service(comptime App: type) type {
             try self.listeners.addTcp(allocator, addr);
         }
 
-        /// Run the accept loop. v0.1: single listener, single thread,
-        /// runs until the process is killed.
+        /// Accept loop. Each accepted connection is dispatched to a worker
+        /// via `Group.concurrent` and runs concurrently with all other
+        /// connections. Blocks here until the listener errors fatally.
         pub fn startService(self: *Self, io: Io, allocator: std.mem.Allocator) !void {
             const built = try self.listeners.build(io, allocator);
             defer allocator.free(built);
@@ -107,14 +113,25 @@ pub fn Service(comptime App: type) type {
                     std.log.warn("core: accept failed: {s}", .{@errorName(err)});
                     continue;
                 };
-                const reused = self.app.process_new(io, stream) catch |err| {
-                    std.log.warn("core: process_new failed: {s}", .{@errorName(err)});
+                // ponytail: handing each conn to the Group means shutdown can
+                // `self.inflight.cancel(io)` to break all in-flight proxied
+                // requests at once. Today we just leak the group (process
+                // exit reaps it); wire `cancel` into the v0.2 signal handler.
+                self.inflight.concurrent(io, handleConn, .{ &self.app, io, stream }) catch |err| {
+                    std.log.warn("core: dispatch failed: {s}", .{@errorName(err)});
                     stream.close(io);
-                    continue;
                 };
-                if (reused) |r| r.close(io);
-                stream.close(io);
             }
+        }
+
+        fn handleConn(app: *App, io: Io, stream: Stream) void {
+            const reused = app.process_new(io, stream) catch |err| {
+                std.log.warn("core: process_new failed: {s}", .{@errorName(err)});
+                stream.close(io);
+                return;
+            };
+            if (reused) |r| r.close(io);
+            stream.close(io);
         }
     };
 }
