@@ -9,6 +9,9 @@ pub const zglru = @import("zigora_lru/root.zig");
 pub const zgketama = @import("zigora_ketama/root.zig");
 pub const zgtinyufo = @import("zigora_tinyufo/root.zig");
 
+// v0.2 phase 2 packages
+pub const zgpool = @import("zigora_pool/root.zig");
+
 // v0.2 stubs (reserved)
 pub const zglb = @import("zigora_lb/root.zig");
 pub const zgcache = @import("zigora_cache/root.zig");
