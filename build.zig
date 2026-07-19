@@ -50,6 +50,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigora-tinyufo", .module = tinyufo_mod },
         },
     });
+    const lb_mod = b.addModule("zigora-lb", .{
+        .root_source_file = b.path("lib/zigora_lb/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zigora-ketama", .module = ketama_mod },
+        },
+    });
 
     // core depends on error and http
     const core_mod = b.addModule("zigora-core", .{
@@ -90,6 +98,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigora-tinyufo", .module = tinyufo_mod },
             .{ .name = "zigora-pool", .module = pool_mod },
             .{ .name = "zigora-memory-cache", .module = memcache_mod },
+            .{ .name = "zigora-lb", .module = lb_mod },
         },
     });
 
