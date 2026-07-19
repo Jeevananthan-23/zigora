@@ -16,6 +16,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // phase 1 v0.2 packages — no internal deps
+    const limits_mod = b.addModule("zigora-limits", .{
+        .root_source_file = b.path("lib/zigora_limits/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lru_mod = b.addModule("zigora-lru", .{
+        .root_source_file = b.path("lib/zigora_lru/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ketama_mod = b.addModule("zigora-ketama", .{
+        .root_source_file = b.path("lib/zigora_ketama/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const tinyufo_mod = b.addModule("zigora-tinyufo", .{
+        .root_source_file = b.path("lib/zigora_tinyufo/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // core depends on error and http
     const core_mod = b.addModule("zigora-core", .{
         .root_source_file = b.path("lib/zigora_core/root.zig"),
@@ -49,6 +71,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigora-http", .module = http_mod },
             .{ .name = "zigora-proxy", .module = proxy_mod },
             .{ .name = "zigora-error", .module = error_mod },
+            .{ .name = "zigora-limits", .module = limits_mod },
+            .{ .name = "zigora-lru", .module = lru_mod },
+            .{ .name = "zigora-ketama", .module = ketama_mod },
+            .{ .name = "zigora-tinyufo", .module = tinyufo_mod },
         },
     });
 
