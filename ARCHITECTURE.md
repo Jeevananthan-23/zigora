@@ -6,34 +6,35 @@ Zigora is a Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pin
 
 ## 1. Pingora-to-Zigora map
 
-| Pingora crate | Zigora package | v0.1 status |
+| Pingora crate | Zigora package | v0.2 status |
 |---|---|---|
 | `pingora` (umbrella lib) | `src/root.zig` + `lib/root.zig` | Active |
-| `pingora-core` | `lib/zigora_core/` | **[v0.1]** Server, Listeners, Service |
+| `pingora-core` | `lib/zigora_core/` | **[v0.1]** Server, Service, Listeners — **[v0.1.1]** async via `io.async`/`Group.concurrent` |
 | `pingora-proxy` | `lib/zigora_proxy/` | **[v0.1]** ProxyHttp trait, Session, dispatch |
-| `pingora-http` | `lib/zigora_http/` | **[v0.1]** RequestHeader, ResponseHeader |
+| `pingora-http` | `lib/zigora_http/` | **[v0.1]** Request parser — **[v0.1.1]** `ResponseHeader`, `headersToH1Wire`, `HttpTask` |
 | `pingora-error` | `lib/zigora_error/` | **[v0.1]** Error struct + ErrorType |
-| `pingora-load-balancing` | `lib/zigora_lb/` | v0.2 |
-| `pingora-cache` | `lib/zigora_cache/` | v0.2 |
-| `pingora-limits` | `lib/zigora_limits/` | v0.2 |
-| `pingora-tls` (open/boringssl) | `lib/zigora_tls/` | v0.2 |
-| `pingora-pool` | `lib/zigora_pool/` | v0.2 — connection reuse |
-| `pingora-ketama` | `lib/zigora_ketama/` | v0.2 — consistent hash ring |
-| `pingora-lru` | `lib/zigora_lru/` | v0.2 |
-| `pingora-memory-cache` | `lib/zigora_memory_cache/` | v0.2 |
-| `tinyufo` | `lib/zigora_tinyufo/` | v0.2 |
-| `pingora-timeout` | (none) | Zig `std.Io` provides timeouts natively |
-| `pingora-runtime` | (none) | `std.Io` + per-core event loops; no tokio port |
-| `pingora-header-serde` | (none) | zstd header compression — low priority |
-| `pingora-prometheus` | `lib/zigora_metrics/` | v0.2 |
-| (no bin in Pingora) | `src/main.zig` | Zigora ships as an app, unlike Pingora's lib-only model |
+| `pingora-limits` | `lib/zigora_limits/` | **[v0.1.1]** `Estimator`, `Inflight`, `Rate` |
+| `pingora-lru` | `lib/zigora_lru/` | **[v0.1.1]** `Lru(T, N)` sharded weighted LRU |
+| `pingora-ketama` | `lib/zigora_ketama/` | **[v0.1.1]** `Continuum` consistent hash ring |
+| `pingora-pool` | `lib/zigora_pool/` | **[v0.1.1]** `ConnectionPool(S)` + `PoolNode(S)` |
+| `tinyufo` | `lib/zigora_tinyufo/` | **[v0.1.1]** `TinyUfo(T)` S3-FIFO + TinyLFU |
+| `pingora-load-balancing` | `lib/zigora_lb/` | v0.2 phase 2 |
+| `pingora-memory-cache` | (reserved) | v0.2 phase 2 — `lib/zigora_memory_cache/` |
+| `pingora-cache` | `lib/zigora_cache/` | v0.2 phase 2 |
+| `pingora-tls` (open/boringssl/rustls/s2n) | `lib/zigora_tls/` | v0.2 phase 3 |
+| `pingora-prometheus` | `lib/zigora_metrics/` | v0.2 phase 4 |
+| `pingora-timeout` | (none) | `std.Io.Timeout` covers it |
+| `pingora-runtime` | (none) | `std.Io` is the runtime |
+| `pingora-header-serde` | (none) | Deferred indefinitely |
+| (no bin in Pingora) | `src/main.zig` | Zigora ships as a binary |
 
 **Key Zig-Pingora design shifts:**
 
-1. **No async runtime.** Pingora depends on tokio; Zigora uses `std.Io` (per-core `io_uring`/`epoll` event loops). No `pingora-runtime` equivalent exists — `std.Io` IS the runtime.
+1. **No async runtime.** Pingora depends on tokio; Zigora uses `std.Io` (`io.async` / `Group.concurrent` on the Threaded/Uring/Evented worker pool). No `pingora-runtime` equivalent.
 2. **No `pingora-timeout`.** `std.Io.Timeout` covers fast-timeout needs natively.
-3. **Binary ships.** `src/main.zig` is Zigora's equivalent of Pingora users' own `fn main()` — it wires `Server.new()` + `add_service()` + `run_forever()`.
-4. **Four packages land in v0.1** (core, proxy, http, error), six in v0.2 (lb, cache, limits, tls, pool, ketama, lru, memory-cache, tinyufo, metrics), and three crate equivalents are absorbed by stdlib (runtime, timeout) or deferred indefinitely (header-serde).
+3. **Binary ships.** `src/main.zig` is Zigora's equivalent of Pingora users' own `fn main()`.
+4. **Phase 1 (v0.1.1) packages are pure unblockers.** limits/lru/ketama/tinyufo/pool have zero internal deps. They form the foundation for the composite packages in phase 2.
+5. **No `CaseMap`** — Zigora's `Header.name` slice keeps original case, so the dual-HMap trick Pingora uses is unnecessary; `headersToH1Wire` preserves case in one pass.
 
 ---
 
@@ -305,3 +306,27 @@ lib/
 - **ProxyHttp trait is v0.1 minimum.** The 30+ Pingora callbacks compress to 3 in v0.1 (new_ctx, upstream_peer, logging). Others default to passthrough. Add retry, cache, body filtering callbacks as features land.
 - **Error type is first — shared by everything.** In Pingora, `pingora-error` has zero dependencies. In Zigora, `zigora_error` must land before any other package uses structured errors. Current v0.1 code uses raw Zig error sets — should be migrated to `zigora_error.Error` before v0.2.
 - **Package re-exports must align with Pingora's `prelude` pattern.** Each Zig `root.zig` re-exports its public surface under a short prefix (`zigora-Error::new_up`, etc.) so library consumers can import one name and use dotted access.
+
+---
+
+## 9. Implementation status (v0.2 phase 1 + 2.6)
+
+Phase 1 (v0.1.1 tag) — **complete**. See `V0.2_ROADMAP.md` for the plan.
+
+| Package | Public API | Notes |
+|---|---|---|
+| `zigora_limits` | `Estimator` (Count-Min Sketch, atomic `isize`), `Inflight` + `Guard` (auto-decrement on `deinit`), `Rate` (red/blue slot toggle) | Lock-free `Estimator`; `Rate` is mutex-free via atomics. |
+| `zigora_lru` | `Lru(T, N).init/admit/promote/remove/evictShard/evictToLimit/peek/peekWeight` | N shards, `std.Thread.Mutex` per shard. Order is a `std.ArrayList(u64)`. |
+| `zigora_ketama` | `Continuum.init/node/nodeIdx/getAddr`, `Bucket` | V1 only (no v2 packed repr). `std.hash.Crc32`, 160 pts/weight. |
+| `zigora_tinyufo` | `TinyUfo(T).get/put/forcePut/remove`, `KV(T)` | One mutex (Pingora's crate is lock-free). S3-FIFO + TinyLFU admission. |
+| `zigora_http` (additions) | `ResponseHeader.parse/toH1Wire`, `headersToH1Wire`, `HttpTask` union | No `CaseMap` struct — `Header.name` keeps original case. |
+| `zigora_core` (refactor) | `Server.runForever` uses `io.async` + `Future.await`; `Service.startService` uses `Group.concurrent` per conn | No `std.Thread.spawn` anywhere. |
+
+Phase 2 (v0.2.x tags) — progress:
+
+| Package | Status | Notes |
+|---|---|---|
+| `zigora_pool` (2.6) | **complete** | Single-mutex port of `pingora-pool`. `ConnectionPool(S)` with size cap; no idle watcher. |
+| `zigora_memory_cache` (2.7) | pending | Wraps `TinyUfo`. |
+| `zigora_lb` (2.8) | pending | Uses `zigora_ketama` for `Consistent`. |
+| `zigora_cache` (2.9) | pending | Largest surface — `HttpCache` + `Storage`/`HitHandler`/`MissHandler` traits. |

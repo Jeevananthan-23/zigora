@@ -233,7 +233,7 @@ pub const Rate = struct {
 // ===== Tests =====
 
 test "Estimator incr/get/decr" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var est = try Estimator.init(alc, 8, 8);
     defer est.deinit();
     try std.testing.expectEqual(@as(isize, 1), est.incr(1, 1));
@@ -246,7 +246,7 @@ test "Estimator incr/get/decr" {
 }
 
 test "Estimator reset zeros everything" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var est = try Estimator.init(alc, 4, 16);
     defer est.deinit();
     _ = est.incr(7, 5);
@@ -257,7 +257,7 @@ test "Estimator reset zeros everything" {
 }
 
 test "Inflight auto-decrement via Guard.deinit" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var inf = try Inflight.init(alc);
     defer inf.deinit(alc);
 
@@ -274,7 +274,7 @@ test "Inflight auto-decrement via Guard.deinit" {
 }
 
 test "Rate observe + rate across intervals" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     // 100ms interval — short for tests
     var r = try Rate.init(alc, 100);
     defer r.deinit();
@@ -294,7 +294,7 @@ test "Rate observe + rate across intervals" {
 }
 
 test "Rate returns 0 after 2+ missed intervals" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var r = try Rate.init(alc, 50);
     defer r.deinit();
     _ = r.observe(1, 10);
