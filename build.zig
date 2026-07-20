@@ -71,6 +71,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const metrics_mod = b.addModule("zigora-metrics", .{
+        .root_source_file = b.path("lib/zigora_metrics/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zigora-http", .module = http_mod },
+        },
+    });
 
     // core depends on error and http
     const core_mod = b.addModule("zigora-core", .{
@@ -114,6 +122,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigora-lb", .module = lb_mod },
             .{ .name = "zigora-cache", .module = cache_mod },
             .{ .name = "zigora-tls", .module = tls_mod },
+            .{ .name = "zigora-metrics", .module = metrics_mod },
         },
     });
 
