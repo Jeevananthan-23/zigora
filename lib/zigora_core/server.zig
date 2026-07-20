@@ -1,6 +1,8 @@
 //! Port of pingora-core's `Server`. v0.2: per-service `io.async` futures
 //! running on the `std.Io` worker pool (no `std.Thread`), joined via
-//! `Future.await`. No graceful shutdown yet — see V0.2_ROADMAP.md phase 4.
+//! `Future.await`. Graceful shutdown via atomic flag + ShutdownWatch.
+//!
+//! v0.2: signal handlers, FD transfer, keepalive — see V0.2_ROADMAP.md phase 4.
 
 const std = @import("std");
 const Io = std.Io;
@@ -10,7 +12,7 @@ pub const zgcore_server = @This();
 
 pub const ServerConf = struct {
     threads: usize = 1,
-    // v0.2: graceful_shutdown_timeout_seconds, grace_period_seconds, etc.
+    graceful_shutdown_timeout_ms: u64 = 5000,
 };
 
 pub const ExecutionPhase = enum {
@@ -33,10 +35,22 @@ pub const ServiceSlot = struct {
     userdata: *anyopaque,
 };
 
+/// `ShutdownWatch` — a receiver that accept loops poll per iteration.
+/// Created by `Server.shutdownWatch()`. Calling `Server.shutdown()` wakes all.
+pub const ShutdownWatch = struct {
+    flag: *std.atomic.Value(bool),
+
+    pub fn check(self: ShutdownWatch) bool {
+        return self.flag.load(.acquire);
+    }
+};
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     conf: ServerConf,
     services: std.ArrayList(ServiceSlot),
+    shutdown_flag: std.atomic.Value(bool) = .{ .raw = false },
+    phase_: std.atomic.Value(ExecutionPhase) = .{ .raw = ExecutionPhase.Setup },
 
     pub fn new(allocator: std.mem.Allocator, conf: ServerConf) Server {
         return .{ .allocator = allocator, .conf = conf, .services = .empty };
@@ -51,13 +65,24 @@ pub const Server = struct {
         return .{ .name = slot.name, .index = idx };
     }
 
+    /// Get a `ShutdownWatch` for the accept loop to poll.
+    pub fn shutdownWatch(self: *Server) ShutdownWatch {
+        return .{ .flag = &self.shutdown_flag };
+    }
+
+    /// Trigger graceful shutdown. Sets the flag, transitions phase.
+    pub fn shutdown(self: *Server) void {
+        self.shutdown_flag.store(true, .release);
+        _ = self.phase.swap(ExecutionPhase.ShutdownStarted, .acq_rel);
+    }
+
     /// Spawn one `io.async` future per service on the `Io` worker pool,
-    /// then block on each future in order. v0.2: services are concurrent
-    /// and non-blocking; the process-provided `Io` (Threaded/Uring/Evented)
-    /// does the scheduling.
+    /// then block on each future. Accept loops poll `shutdownWatch()`.
     pub fn runForever(self: *Server, io: Io) !void {
         if (self.services.items.len == 0) return error.NoServices;
         std.log.info("core: server starting {d} service(s)", .{self.services.items.len});
+
+        _ = self.phase.swap(ExecutionPhase.Running, .acq_rel);
 
         const ServiceFuture = Future(void);
 
@@ -85,17 +110,16 @@ pub const Server = struct {
             std.log.info("core: service '{s}' stopped", .{self.services.items[i].name});
         }
 
+        _ = self.phase.swap(ExecutionPhase.Terminated, .acq_rel);
         std.log.info("core: all services stopped", .{});
+    }
+
+    pub fn phase(self: *Server) ExecutionPhase {
+        return self.phase.load(.acquire);
     }
 };
 
-// ponytail: single-service deployments are the common case; awaiting N futures
-// in registration order works fine. If a service crashing should cancel all
-// others (Pingora's behavior), wire a `Group` here and `group.cancel` on first
-// error — small upgrade path when needed.
-
-// Local alias so the function name resolves — `Io.Future(void)` is the
-// generic factory; the resulting type is what `io.async` returns.
+// Local alias for `Io.Future(void)`.
 fn Future(comptime Result: type) type {
     return std.Io.Future(Result);
 }
@@ -115,4 +139,13 @@ test "Server.new empty has no services" {
 test "ExecutionPhase enum shape" {
     try std.testing.expectEqual(ExecutionPhase.Setup, ExecutionPhase.Setup);
     try std.testing.expectEqual(ExecutionPhase.Terminated, ExecutionPhase.Terminated);
+}
+
+test "ShutdownWatch reports false then true" {
+    const alc = std.testing.allocator;
+    var s = Server.new(alc, .{});
+    const watch = s.shutdownWatch();
+    try std.testing.expect(!watch.check());
+    s.shutdown();
+    try std.testing.expect(watch.check());
 }

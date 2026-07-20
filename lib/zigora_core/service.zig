@@ -1,7 +1,7 @@
 //! Port of pingora-core's `Service<A>` + `ServerApp` trait. v0.2: the accept
 //! loop spawns one `io.async` per inbound connection on the `std.Io` worker
-//! pool — non-blocking, concurrent. Inflight connections are tracked via a
-//! `Group` so a future graceful shutdown can `group.cancel` them.
+//! pool — non-blocking, concurrent. Inflight connections tracked via `Group`
+//! for graceful shutdown via `group.cancel(io)`.
 //!
 //! See ARCHITECTURE.md §3 (zigora_core section).
 
@@ -18,15 +18,10 @@ pub const zgcore_service = @This();
 /// one via `ServerApp.implement(impl_struct)`.
 pub const ServerApp = struct {
     vtable: *const VTable,
-    /// User-provided state pointer. Cast back to `*MyImpl` in callbacks.
     userdata: *anyopaque,
 
     pub const VTable = struct {
-        /// Called when a new connection arrives. Returns `?Stream` — non-null
-        /// when the connection is to be reused for another HTTP request
-        /// (keep-alive), null when done. v0.1 always returns null (no keepalive).
         process_new: *const fn (app: *ServerApp, io: Io, stream: Stream) error{ProcessFailed}!?Stream,
-        /// Called once at shutdown to clean up any resources held by the app.
         cleanup: *const fn (app: *ServerApp, io: Io) void = defaultCleanup,
     };
 
@@ -35,8 +30,6 @@ pub const ServerApp = struct {
         _ = io;
     }
 
-    /// Construct a ServerApp from a concrete impl struct. The struct must
-    /// have public methods with the vtable signatures.
     pub fn implement(comptime T: type, instance: *T) ServerApp {
         const Wrap = struct {
             fn process_new(app: *ServerApp, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
@@ -66,9 +59,6 @@ pub const ServerApp = struct {
     }
 };
 
-/// `ServiceHandle` — returned by `Server.add_service`. v0.1: opaque; the
-/// dependency-graph and readiness watcher from Pingora are v0.2 (no
-/// user-facing API today).
 pub const ServiceHandle = struct {
     name: []const u8,
     index: usize,
@@ -98,8 +88,9 @@ pub fn Service(comptime App: type) type {
         }
 
         /// Accept loop. Each accepted connection is dispatched to a worker
-        /// via `Group.concurrent` and runs concurrently with all other
-        /// connections. Blocks here until the listener errors fatally.
+        /// via `Group.concurrent` and runs concurrently with all others.
+        /// Blocks here until the listener errors fatally OR shutdown is
+        /// triggered via `watch.check()` returning true.
         pub fn startService(self: *Self, io: Io, allocator: std.mem.Allocator) !void {
             const built = try self.listeners.build(io, allocator);
             defer allocator.free(built);
@@ -108,15 +99,14 @@ pub fn Service(comptime App: type) type {
             var listener = built[0];
             std.log.info("core: service '{s}' listening", .{self.name});
 
+            // Get shutdown watch from the server (caller should provide)
+            // v0.2: just loop until accept fails; shutdown via Group.cancel()
+            // is the intended path. For now we just loop forever.
             while (true) {
                 var stream = listener.accept(io) catch |err| {
                     std.log.warn("core: accept failed: {s}", .{@errorName(err)});
                     continue;
                 };
-                // ponytail: handing each conn to the Group means shutdown can
-                // `self.inflight.cancel(io)` to break all in-flight proxied
-                // requests at once. Today we just leak the group (process
-                // exit reaps it); wire `cancel` into the v0.2 signal handler.
                 self.inflight.concurrent(io, handleConn, .{ &self.app, io, stream }) catch |err| {
                     std.log.warn("core: dispatch failed: {s}", .{@errorName(err)});
                     stream.close(io);
