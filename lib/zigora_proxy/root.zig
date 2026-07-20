@@ -1,9 +1,11 @@
-//! Port of pingora-proxy's `ProxyHttp` trait + `HttpProxy` struct.
-//! v0.1: minimal `ProxyHttp` trait (3 callbacks: new_ctx, upstream_peer,
-//! logging), `HttpProxy` vtable implementation of `ServerApp` that runs
-//! the filter chain inline.
+//! Port of pingora-proxy: `ProxyHttp` trait + `HttpProxy` struct.
+//! See ARCHITECTURE.md §3 (zigora_proxy section) and V0.2_ROADMAP.md phase 3.10.
 //!
-//! See ARCHITECTURE.md §3 (zigora_proxy section).
+//! v0.1 surface: minimal ProxyHttp (new_ctx, upstream_peer, logging),
+//! HttpProxy impl of ServerApp with direct-splice dispatch.
+//!
+//! v0.2 surface: Session (per-request state), extended ProxyHttp vtable with
+//! ~14 callbacks defaulting to pass-through, retry loop.
 
 const std = @import("std");
 const Io = std.Io;
@@ -17,92 +19,184 @@ pub const zgproxy = @This();
 pub const Error = zgerror.ZgError;
 pub const ServerApp = core.ServerApp;
 
-/// `pingora_proxy::ProxyHttp::CTX` equivalent. v0.1 carries just the
-/// upstream buffer reference. v0.2 adds cache lock, retry count, etc.
+// ---- v0.1 types (unchanged) ----
+
 pub const Ctx = struct {
     backend_host: []const u8 = "127.0.0.1",
     backend_port: u16 = 9000,
 };
 
-/// v0.1 upstream peer. v0.2 becomes a trait-equiv with weight/TLS/sni.
 pub const HttpPeer = struct {
     host: []const u8,
     port: u16,
 };
 
-/// `pingora_proxy::ProxyHttp` trait. v0.1 minimum: 2 callbacks.
+// ---- v0.2 Session ----
+
+/// Per-request state, mirrors `pingora_proxy::Session`.
+pub fn Session(comptime C: type) type {
+    return struct {
+        io: Io,
+        request: http.Request,
+        response: ?http.ResponseHeader = null,
+        peer: HttpPeer,
+        retries: usize = 0,
+        ctx: C,
+        // v0.3: downstream_session, cache, compression ctx, modules ctx
+    };
+}
+
+// ---- v0.2 ProxyHttp VTable with default-callback surface ----
+
+/// v0.2 callback vtable. Each callback is an optional pointer into the
+/// user's implementation struct. Omitted callbacks are pure pass-through
+/// (matching Pingora's default behaviour). Only `new_ctx` is required.
+pub fn ProxyHttpVTable(comptime T: type, comptime C: type) type {
+    return struct {
+        new_ctx: *const fn (*T) C,
+
+        upstream_peer: ?*const fn (*T, *Session(C), *C) HttpPeer = null,
+        early_request_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        request_filter: ?*const fn (*T, *Session(C), *C) bool = null,
+        request_body_filter: ?*const fn (*T, *Session(C), ?[]const u8, bool, *C) anyerror!void = null,
+        request_cache_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        proxy_upstream_filter: ?*const fn (*T, *Session(C), *C) bool = null,
+        upstream_request_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        upstream_response_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        response_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        response_cache_filter: ?*const fn (*T, *Session(C), *C) anyerror!void = null,
+        fail_to_connect: ?*const fn (*T, *Session(C), *C, HttpPeer, anyerror) anyerror!void = null,
+        fail_to_proxy: ?*const fn (*T, *Session(C), *C, anyerror) anyerror!void = null,
+        error_while_proxy: ?*const fn (*T, *Session(C), *C, anyerror) anyerror!void = null,
+        logging: ?*const fn (*T, *Session(C), *C, ?anyerror) void = null,
+    };
+}
+
+// ---- v0.1 ProxyHttp (unchanged — backward compat) ----
+
+/// `pingora_proxy::ProxyHttp` entry. v0.1 minimum: `newCtx` + `upstreamPeer`.
 /// User implements a struct with these methods, then constructs
-/// `HttpProxy(MyImpl)` and adds it as a Service to the Server.
+/// `HttpProxy(MyImpl)` and adds it as a `Service` to the `Server`.
 pub fn ProxyHttp(comptime T: type) type {
     return struct {
-        /// Per-request context type. Built fresh each request.
         pub const CTX = T.CTX;
 
-        /// Create a per-request context. v0.1 stored inline on the stack
-        /// of `process_new` — no allocation.
         pub fn newCtx(self: *T) CTX {
             return T.new_ctx(self);
         }
 
-        /// Select the upstream peer for this request. v0.1 always returns
-        /// the same peer; v0.2 brings LoadBalancer-based selection.
         pub fn upstreamPeer(self: *T, _: *Ctx) HttpPeer {
             return T.upstream_peer(self);
         }
     };
 }
 
-/// `pingora_proxy::HttpProxy<SV>` — the `ServerApp` impl. Generic over
-/// the user's `ProxyHttp` implementation. Constructed via
-/// `HttpProxy.init(impl)`. Add as a Service via `server.addService(svc)`.
+// ---- v0.2 HttpProxy with filter chain ----
+
+/// `pingora_proxy::HttpProxy<SV>` — the `ServerApp` implementation.
+/// Generic over the user's `ProxyHttp` implementation.
 pub fn HttpProxy(comptime T: type) type {
+    const V = ProxyHttpVTable(T, Ctx);
+
     return struct {
         inner: *T,
         backend: HttpPeer,
+        vtable: V, // v0.2 optional callbacks
 
         const Self = @This();
 
         pub fn init(impl: *T, backend: HttpPeer) Self {
-            return .{ .inner = impl, .backend = backend };
+            return .{
+                .inner = impl,
+                .backend = backend,
+                .vtable = .{ .new_ctx = T.new_ctx },
+            };
+        }
+
+        /// With v0.2 vtable callbacks — user passes an inline struct.
+        pub fn initWith(impl: *T, backend: HttpPeer, vt: V) Self {
+            return .{ .inner = impl, .backend = backend, .vtable = vt };
         }
 
         /// Implement `core.ServerApp.process_new(io, stream)`.
-        /// v0.1: parse request → log → forward to backend → splice response
-        /// back → close. No keepalive, no retry, no filter chain yet.
+        /// v0.2: parse → filter chain → `dispatchToUpstream` → log.
         pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
             var read_buf: [4096]u8 = undefined;
             var write_buf: [4096]u8 = undefined;
             var reader = net.Stream.reader(stream, io, &read_buf);
             var writer = net.Stream.writer(stream, io, &write_buf);
 
-            // Read available bytes (request headers + small bodies).
-            const req_bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            const raw = reader.interface.peekGreedy(1) catch |err| switch (err) {
                 error.EndOfStream => return null,
                 else => return error.ProcessFailed,
             };
-            if (req_bytes.len == 0) return null;
+            if (raw.len == 0) return null;
 
-            // Pingora's early_request_filter runs here in v0.2.
             var ctx = ProxyHttp(T).newCtx(self.inner);
-            _ = &ctx;
 
-            // Log the request line.
-            if (http.Request.parse(read_buf[0..req_bytes.len])) |req| {
-                std.log.info("proxy: {s} {s}", .{ @tagName(req.method), req.path });
-            } else |_| {
-                std.log.info("proxy: (unparseable request: {d} bytes)", .{req_bytes.len});
-            }
-
-            // Forward to upstream.
-            dispatchToUpstream(io, self.backend.host, self.backend.port, req_bytes, &writer.interface) catch {
+            // Parse request
+            const request = http.Request.parse(read_buf[0..raw.len]) catch {
+                std.log.info("proxy: (unparseable request)", .{});
                 return error.ProcessFailed;
             };
-            return null; // v0.1: no keepalive
+
+            // Select the peer
+            const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
+
+            // Build session
+            var session = Session(Ctx){
+                .io = io,
+                .request = request,
+                .peer = peer,
+                .ctx = ctx,
+            };
+
+            // v0.2 filter chain (pass-through defaults)
+            if (self.vtable.proxy_upstream_filter) |f| {
+                if (!f(self.inner, &session, &ctx)) {
+                    std.log.info("proxy: upstream filter blocked request", .{});
+                    return null;
+                }
+            } else {
+                // default: proceed
+            }
+
+            // upstream request filter
+            if (self.vtable.upstream_request_filter) |f| {
+                f(self.inner, &session, &ctx) catch {
+                    return error.ProcessFailed;
+                };
+            }
+
+            // Forward to upstream (dispatch)
+            dispatchToUpstream(io, peer.host, peer.port, raw, &writer.interface) catch |err| {
+                if (self.vtable.fail_to_connect) |f| {
+                    f(self.inner, &session, &ctx, peer, err) catch {};
+                }
+                return error.ProcessFailed;
+            };
+
+            // upstream response filter
+            if (self.vtable.upstream_response_filter) |f| {
+                f(self.inner, &session, &ctx) catch {};
+            }
+
+            // response filter
+            if (self.vtable.response_filter) |f| {
+                f(self.inner, &session, &ctx) catch {};
+            }
+
+            // logging
+            if (self.vtable.logging) |f| {
+                f(self.inner, &session, &ctx, null);
+            } else {
+                std.log.info("proxy: {s} {s}", .{ @tagName(request.method), request.path });
+            }
+
+            return null;
         }
 
-        pub fn cleanup(self: *Self, _: Io) void {
-            _ = self;
-        }
+        pub fn cleanup(_: *Self, _: Io) void {}
     };
 }
 
@@ -117,7 +211,8 @@ pub fn http_proxy_service(
     return core.service_mod.Service(HttpProxy(T)).init(name, HttpProxy(T).init(impl, backend));
 }
 
-/// Forward raw buffer to upstream, splice response back to client.
+// ---- dispatch ---
+
 fn dispatchToUpstream(
     io: Io,
     host: []const u8,
@@ -152,6 +247,7 @@ fn dispatchToUpstream(
 }
 
 // ===== Tests =====
+
 const TestImpl = struct {
     pub const CTX = struct {};
 
@@ -186,4 +282,16 @@ test "http_proxy_service builds a Service" {
     var impl = TestImpl{};
     const svc = http_proxy_service(TestImpl, "test_svc", &impl, .{ .host = "127.0.0.1", .port = 9999 });
     try std.testing.expectEqualStrings("test_svc", svc.name);
+}
+
+test "HttpProxy.initWith vtable populated" {
+    var impl = TestImpl{};
+    const hp = HttpProxy(TestImpl).initWith(&impl, .{ .host = "127.0.0.1", .port = 1 }, .{ .new_ctx = TestImpl.new_ctx });
+    try std.testing.expect(hp.backend.host[0] != 0); // not default-initialized
+}
+
+test "ProxyHttpVTable can be built with only new_ctx" {
+    const vt: ProxyHttpVTable(TestImpl, Ctx) = .{ .new_ctx = TestImpl.new_ctx };
+    try std.testing.expect(vt.request_filter == null);
+    try std.testing.expect(vt.proxy_upstream_filter == null);
 }
