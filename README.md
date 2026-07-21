@@ -2,7 +2,7 @@
 
 A native Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pingora) — an HTTP reverse proxy and load balancer framework built without a generic async runtime. Uses `std.Io` (`io.async` / `Group.concurrent` on the Threaded/Uring/Evented worker pool) for all scheduling — no `std.Thread.spawn` anywhere.
 
-## Current release: v0.1.1 (phase 1 milestone)
+## Current release: v0.2.1 (phase 2 milestone)
 
 ### v0.1 surface (initial framework)
 
@@ -22,24 +22,37 @@ A native Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pingor
 - **`zigora_pool`** — `ConnectionPool(S)` + `PoolNode(S)` with size cap.
 - **`zigora_core`** (refactor) — `Server.runForever` uses `io.async` + `Future.await`; `Service.startService` uses `Group.concurrent` per connection.
 
+### v0.2.0 / v0.2.1 additions (phase 2 – all packages integrated)
+
+- **`zigora_proxy`** — `ProxyHttpVTable` with ~14 optional callbacks (filter chain), `Session(C)` per-request state, `HttpProxy.init` auto-wires declared callbacks. Built-in `/metrics` and `/admin` intercept.
+- **`zigora_core`** — `Server.shutdown()` + `ShutdownWatch` for graceful shutdown; atomic phase transitions.
+- **`zigora_memory_cache`** — `MemoryCache(T)` wrapping `TinyUfo` with TTL and `getStale`.
+- **`zigora_pool`** — `ConnectionPool(S)` with `GroupKey → PoolNode` map and size-cap eviction.
+- **`zigora_lb`** — `LoadBalancer(S)` with 4 selectors: `RoundRobin`, `Random`, `FNVHash`, `Consistent` (ketama).
+- **`zigora_cache`** — `HttpCache` state machine with 12-phase `CachePhase`, vtable interfaces for storage/hit/miss/eviction.
+- **`zigora_tls`** — TLS accept/connect adapter (stubs, interface ready for v0.3).
+- **`zigora_metrics`** — Atomic counters (accepted/active/requests/errors/bytes), Prometheus `/metrics` and admin HTML page.
+- **E2E test** (`test/e2e.sh`) — curls `/metrics` and `/admin`, asserts output, cleans up.
+- **Examples** (`examples/`) — `simple_proxy` and `load_balancer` standalone applications.
+
 ## Modules
 
 | Package | Status | Purpose |
 |---|---|---|
-| `zigora_core` | v0.1.1 | `Server`, `Service`, `Listeners`, `ServerApp` vtable (async via `std.Io`) |
-| `zigora_proxy` | v0.1 | `ProxyHttp` trait, `HttpProxy` app |
+| `zigora_core` | v0.2.1 | `Server`, `Service`, `Listeners`, `ServerApp` vtable (async via `std.Io`) |
+| `zigora_proxy` | v0.2.1 | `ProxyHttp` trait, `HttpProxy` app, filter chain, `/metrics` + `/admin` intercept |
 | `zigora_http` | v0.1.1 | HTTP/1.1 `Request` + `ResponseHeader`, `HttpTask` |
 | `zigora_error` | v0.1 | `ZgError`, `ErrorType`, `ErrorSource` |
-| `zigora_limits` | v0.1.1 | `Estimator`, `Inflight`, `Rate` |
-| `zigora_lru` | v0.1.1 | `Lru(T, N)` sharded weighted LRU |
-| `zigora_ketama` | v0.1.1 | `Continuum` consistent hash ring |
-| `zigora_tinyufo` | v0.1.1 | `TinyUfo(T)` S3-FIFO + TinyLFU cache |
-| `zigora_pool` | v0.1.1 | `ConnectionPool(S)` L4 connection reuse |
-| `zigora_lb` | v0.2 (phase 2.8) | reserved — `LoadBalancer`, selectors, health check |
-| `zigora_cache` | v0.2 (phase 2.9) | reserved — `HttpCache`, `Storage`, `HitHandler`/`MissHandler` |
-| `zigora_memory_cache` | v0.2 (phase 2.7) | reserved — `MemoryCache` wrapping `TinyUfo` |
-| `zigora_tls` | v0.2 (phase 3.11) | reserved — TLS accept/connect adapter |
-| `zigora_metrics` | v0.2 (phase 4.13) | reserved — Prometheus `/metrics` endpoint |
+| `zigora_limits` | v0.2.1 | `Estimator`, `Inflight`, `Rate` |
+| `zigora_lru` | v0.2.1 | `Lru(T, N)` sharded weighted LRU |
+| `zigora_ketama` | v0.2.1 | `Continuum` consistent hash ring |
+| `zigora_tinyufo` | v0.2.1 | `TinyUfo(T)` S3-FIFO + TinyLFU cache |
+| `zigora_pool` | v0.2.1 | `ConnectionPool(S)` L4 connection reuse |
+| `zigora_lb` | v0.2.1 | `LoadBalancer(S)` — RoundRobin, Random, FNVHash, Consistent |
+| `zigora_cache` | v0.2.1 | `HttpCache` state machine, `CachePhase` (12 variants), storage/hit/miss vtable |
+| `zigora_memory_cache` | v0.2.1 | `MemoryCache(T)` wrapping `TinyUfo` with TTL |
+| `zigora_tls` | v0.2.1 | TLS accept/connect adapter (stubs, interface ready) |
+| `zigora_metrics` | v0.2.1 | Atomic counters, Prometheus `/metrics` + admin HTML page |
 
 See `ARCHITECTURE.md` for the authoritative module map and `V0.2_ROADMAP.md` for the phased plan.
 
@@ -55,8 +68,13 @@ zig build
 # Run (listens on 127.0.0.1:8080, forwards to 127.0.0.1:9000 by default)
 zig build run -- --backend 127.0.0.1:9000
 
-# Run tests
+# Test endpoints (no upstream needed)
+curl http://127.0.0.1:8080/metrics   # Prometheus metrics
+curl http://127.0.0.1:8080/admin     # Admin HTML page
+
+# Run tests + E2E
 zig build test
+bash test/e2e.sh
 ```
 
 Requires Zig ≥ 0.16.0. No dependencies. Offline builds work out of the box.
