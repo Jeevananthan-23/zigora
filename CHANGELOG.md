@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.2.1 — 2026-07-21
+
+Bugfix release: v0.2.0 packages compiled individually but the binary and
+examples did not build or run. All packages now compile clean, the proxy
+serves /metrics + /admin, and a regression test suite guards against
+breakage.
+
+### Fixes
+
+- **all packages**: Zig 0.16 API migrations — `std.net.Address` → `Io.net.IpAddress`,
+  `std.io.fixedBufferStream` → `Io.Writer.fixed()`, `std.Thread.Mutex` → spinlock,
+  `std.AutoArrayHashMap` → `Unmanaged`, `@typeInfo(...).Struct` → `@"struct"`.
+  All 13 modules compile without errors or warnings.
+- **proxy** (`lib/zigora_proxy/root.zig`): `HttpProxy.init` now wires the
+  `proxy_upstream_filter` callback from `T` if declared (with type coercion).
+  `process_new` no longer uses undefined stream after `Session` takes ownership.
+  `dispatchToUpstream` error path logs `ProcessFailed` instead of crashing.
+- **core** (`lib/zigora_core/service.zig`): `handleConn` no longer double-closes
+  the stream when `process_new` returns `null` (filter consumed the stream).
+- **metrics** (`lib/zigora_metrics/root.zig`): `renderAdmin` format string — escaped
+  `{`/`}` CSS braces for `Io.Writer.print`. Replaced dead `std.io.fixedBufferStream`
+  tests with `Io.Writer.fixed()`. Tests now actually compile and run via dedicated
+  `zigora-metrics` test step in `build.zig`.
+- **main.zig**: Full v0.2 integration restored — all 13 packages wired into
+  `AppState`, `MyProxy.proxy_upstream_filter` intercepts `/metrics` and `/admin`
+  before upstream connection, writes response via `Io.Writer` + flush + stream close.
+
+### Additions
+
+- **E2E test** (`test/e2e.sh`): builds binary, curls `/metrics` and `/admin`,
+  asserts Prometheus text and admin HTML content, cleans up. Run with `bash test/e2e.sh`.
+- **Examples**: `examples/simple_proxy/` and `examples/load_balancer/` — minimal
+  standalone proxy applications. Build with `zig build` (installed to `zig-out/bin/`).
+
+### Tag
+
+`v0.2.1`
+
 ## v0.2.0 — 2026-07-20
 
 Phase 2 complete: composite packages + proxy/TLS + core signals + metrics.

@@ -15,7 +15,7 @@ pub const ServerConf = struct {
     graceful_shutdown_timeout_ms: u64 = 5000,
 };
 
-pub const ExecutionPhase = enum {
+pub const ExecutionPhase = enum(u32) {
     Setup,
     Bootstrap,
     BootstrapComplete,
@@ -73,7 +73,7 @@ pub const Server = struct {
     /// Trigger graceful shutdown. Sets the flag, transitions phase.
     pub fn shutdown(self: *Server) void {
         self.shutdown_flag.store(true, .release);
-        _ = self.phase.swap(ExecutionPhase.ShutdownStarted, .acq_rel);
+        _ = self.phase_.swap(ExecutionPhase.ShutdownStarted, .acq_rel);
     }
 
     /// Spawn one `io.async` future per service on the `Io` worker pool,
@@ -82,7 +82,7 @@ pub const Server = struct {
         if (self.services.items.len == 0) return error.NoServices;
         std.log.info("core: server starting {d} service(s)", .{self.services.items.len});
 
-        _ = self.phase.swap(ExecutionPhase.Running, .acq_rel);
+        _ = self.phase_.swap(ExecutionPhase.Running, .acq_rel);
 
         const ServiceFuture = Future(void);
 
@@ -110,12 +110,12 @@ pub const Server = struct {
             std.log.info("core: service '{s}' stopped", .{self.services.items[i].name});
         }
 
-        _ = self.phase.swap(ExecutionPhase.Terminated, .acq_rel);
+        _ = self.phase_.swap(ExecutionPhase.Terminated, .acq_rel);
         std.log.info("core: all services stopped", .{});
     }
 
     pub fn phase(self: *Server) ExecutionPhase {
-        return self.phase.load(.acquire);
+        return self.phase_.load(.acquire);
     }
 };
 

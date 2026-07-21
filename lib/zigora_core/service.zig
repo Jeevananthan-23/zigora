@@ -120,8 +120,11 @@ pub fn Service(comptime App: type) type {
                 stream.close(io);
                 return;
             };
-            if (reused) |r| r.close(io);
-            stream.close(io);
+            if (reused) |r| {
+                r.close(io);
+            } else {
+                // null = stream consumed (filter blocked, closed by handler)
+            }
         }
     };
 }

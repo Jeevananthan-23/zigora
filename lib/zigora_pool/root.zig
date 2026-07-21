@@ -14,6 +14,20 @@
 //! Upgrade paths noted inline.
 
 const std = @import("std");
+
+// ponytail: simple spinlock wrapping std.atomic.Mutex for the old
+// std.Thread.Mutex API. Upgrade to std.Io.Mutex + io context when async.
+const Mutex = struct {
+    inner: std.atomic.Mutex = .unlocked,
+
+    pub fn lock(m: *Mutex) void {
+        while (!std.atomic.Mutex.tryLock(&m.inner)) {}
+    }
+
+    pub fn unlock(m: *Mutex) void {
+        std.atomic.Mutex.unlock(&m.inner);
+    }
+};
 const zgpool = @This();
 
 pub const GroupKey = u64;
@@ -31,7 +45,7 @@ pub fn PoolNode(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        mu: std.Thread.Mutex = .{},
+        mu: Mutex = .{},
         // Stored as a singly-linked list of entries; `getAny` pops head.
         // Memory cost: one alloc per entry, amortized low. Optimization:
         // small array buffer if it becomes hot.
@@ -40,8 +54,8 @@ pub fn PoolNode(comptime T: type) type {
         pub const Entry = struct { id: Id, conn: T };
 
         pub fn init(allocator: std.mem.Allocator) Self {
-            return .{ .entries = .empty };
             _ = allocator;
+            return .{ .entries = .empty };
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -49,13 +63,13 @@ pub fn PoolNode(comptime T: type) type {
         }
 
         pub fn getAny(self: *Self, allocator: std.mem.Allocator) ?Entry {
+            _ = allocator;
             self.mu.lock();
             defer self.mu.unlock();
             if (self.entries.items.len == 0) return null;
             return self.entries.orderedRemove(0); // O(n) but list is small
             // ponytail: O(n) shift on hot path; switch to ring buffer
             // (std.RingBuffer) when this shows up in benchmarks.
-            _ = allocator;
         }
 
         pub fn insert(self: *Self, allocator: std.mem.Allocator, id: Id, conn: T) !void {
@@ -93,8 +107,8 @@ pub fn ConnectionPool(comptime S: type) type {
 
         const Meta = ConnectionMeta(S);
 
-        mu: std.Thread.Mutex = .{},
-        nodes: std.AutoArrayHashMap(GroupKey, *PoolNode(S)),
+        mu: Mutex = .{},
+        nodes: std.AutoArrayHashMapUnmanaged(GroupKey, *PoolNode(S)),
         // Insertion order to enforce total size: oldest first.
         order: std.ArrayList(Meta),
         total_size: usize = 0,
@@ -103,7 +117,7 @@ pub fn ConnectionPool(comptime S: type) type {
 
         pub fn init(allocator: std.mem.Allocator, size_limit: usize) Self {
             return .{
-                .nodes = std.AutoArrayHashMap(GroupKey, *PoolNode(S)).init(allocator),
+                .nodes = .{},
                 .order = .empty,
                 .size_limit = size_limit,
                 .allocator = allocator,
@@ -115,7 +129,7 @@ pub fn ConnectionPool(comptime S: type) type {
                 n.deinit(self.allocator);
                 self.allocator.destroy(n);
             }
-            self.nodes.deinit();
+            self.nodes.deinit(self.allocator);
             self.order.deinit(self.allocator);
         }
 
@@ -156,7 +170,7 @@ pub fn ConnectionPool(comptime S: type) type {
             const node_ptr = self.nodes.get(key) orelse blk: {
                 const n = self.allocator.create(PoolNode(S)) catch return meta;
                 n.* = PoolNode(S).init(self.allocator);
-                self.nodes.put(key, n) catch return meta;
+                self.nodes.put(self.allocator, key, n) catch return meta;
                 break :blk n;
             };
 
@@ -177,7 +191,7 @@ pub fn ConnectionPool(comptime S: type) type {
 // ===== Tests =====
 
 test "PoolNode insert/remove/getAny behaves as FIFO" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var n = PoolNode(u32).init(alc);
     defer n.deinit(alc);
     try n.insert(alc, 1, 100);
@@ -188,7 +202,7 @@ test "PoolNode insert/remove/getAny behaves as FIFO" {
 }
 
 test "PoolNode remove finds by id" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var n = PoolNode(u32).init(alc);
     defer n.deinit(alc);
     try n.insert(alc, 1, 10);
@@ -199,7 +213,7 @@ test "PoolNode remove finds by id" {
 }
 
 test "ConnectionPool put then get reuses across same key" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var pool = ConnectionPool(u32).init(alc, 8);
     defer pool.deinit();
     const k = 7;
@@ -212,7 +226,7 @@ test "ConnectionPool put then get reuses across same key" {
 }
 
 test "ConnectionPool rejects when at size limit" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var pool = ConnectionPool(u32).init(alc, 1);
     defer pool.deinit();
     const m1: ConnectionMeta(u32) = .{ .key = 1, .id = 1, .data = 10 };

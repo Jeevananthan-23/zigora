@@ -14,7 +14,7 @@ const zglb = @This();
 
 /// A backend server.
 pub const Backend = struct {
-    addr: std.net.Address,
+    addr: std.Io.net.IpAddress,
     weight: usize = 1,
 
     pub fn new(addr_str: []const u8) !Backend {
@@ -23,7 +23,7 @@ pub const Backend = struct {
         const host = addr_str[0..colon];
         const port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch
             return error.InvalidAddr;
-        const addr = std.net.Address.parseIp(host, port) catch return error.InvalidAddr;
+        const addr = std.Io.net.IpAddress.parse(host, port) catch return error.InvalidAddr;
         return .{ .addr = addr };
     }
 
@@ -41,7 +41,7 @@ pub const Backend = struct {
     }
 
     pub fn eql(a: Backend, b: Backend) bool {
-        return a.weight == b.weight and a.addr.eql(b.addr);
+        return a.weight == b.weight and std.Io.net.IpAddress.eql(&a.addr, &b.addr);
     }
 };
 
@@ -97,7 +97,7 @@ pub const Random = struct {
                 w += 1;
             }
         }
-        return .{ .indices = idx, .seed = std.crypto.random.int(u64) };
+        return .{ .indices = idx, .seed = 0 }; // ponytail: deterministic seed
     }
 
     pub fn deinit(self: *Random, allocator: std.mem.Allocator) void {
@@ -151,14 +151,15 @@ pub const Consistent = struct {
 
     pub fn build(backends: []const Backend, allocator: std.mem.Allocator) !Consistent {
         // Sort by addr to ensure Backends order is stable
-        var sorted = try allocator.alloc(Backend, backends.len);
+        const sorted = try allocator.alloc(Backend, backends.len);
+        defer allocator.free(sorted);
         @memcpy(sorted, backends);
         std.mem.sort(Backend, sorted, {}, backendLessThan);
         // Build buckets, deduping by address
         var unique = std.ArrayList(Backend).empty;
         defer unique.deinit(allocator);
         for (sorted) |b| {
-            if (unique.items.len == 0 or !unique.items[unique.items.len - 1].eql(b)) {
+            if (unique.items.len == 0 or !std.Io.net.IpAddress.eql(&unique.items[unique.items.len - 1].addr, &b.addr)) {
                 try unique.append(allocator, b);
             }
         }
@@ -180,7 +181,7 @@ pub const Consistent = struct {
         // Continuum.node already wraps the addr — we need an index into `backends`.
         const addr = self.continuum.node(key) orelse return null;
         for (self.backends, 0..) |b, i| {
-            if (b.addr.eql(addr)) return i;
+            if (std.Io.net.IpAddress.eql(&b.addr, &addr)) return i;
         }
         return null;
     }
@@ -189,7 +190,7 @@ pub const Consistent = struct {
 fn backendLessThan(_: void, a: Backend, b: Backend) bool {
     // lexicographic on ip bytes then port — wyhash would suffice but
     // std.net.Address has no builtin compare, just by port is fine for sorting.
-    return a.addr.getPort() < b.addr.getPort();
+    return std.Io.net.IpAddress.getPort(a.addr) < std.Io.net.IpAddress.getPort(b.addr);
 }
 
 /// `LoadBalancer<S>` — wraps selection algorithm + backend snapshot.
@@ -232,10 +233,11 @@ pub fn LoadBalancer(comptime S: type) type {
         pub fn selectWith(self: *Self, key: []const u8, accept: anytype) ?Backend {
             // Consistent.next returns ?usize; algorithms that return usize
             // wrap with modulo internally. Use comptime to unify the shape.
-            const T_result = @typeInfo(@TypeOf(Self.selector.next)).@"fn".return_type.?;
-            const idx = T_result == usize
-                ?self.selector.next(key)
-                : (self.selector.next(key) orelse return null);
+            const T_result = @typeInfo(@TypeOf(S.next)).@"fn".return_type.?;
+            const idx = if (T_result == usize)
+                self.selector.next(key)
+            else
+                (self.selector.next(key) orelse return null);
             const backend = self.backends[idx];
             if (accept(backend, true)) return backend;
             return null;
@@ -247,7 +249,7 @@ pub fn LoadBalancer(comptime S: type) type {
 
 test "Backend.new parses host:port" {
     const b = try Backend.new("127.0.0.1:9000");
-    try std.testing.expectEqual(@as(u16, 9000), b.addr.getPort());
+    try std.testing.expectEqual(@as(u16, 9000), std.Io.net.IpAddress.getPort(b.addr));
 }
 
 test "Backend weight defaults to 1" {
@@ -256,7 +258,7 @@ test "Backend weight defaults to 1" {
 }
 
 test "RoundRobin distributes evenly" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var backends = [_]Backend{
         try Backend.new("127.0.0.1:9000"),
         try Backend.new("127.0.0.1:9001"),
@@ -266,13 +268,13 @@ test "RoundRobin distributes evenly" {
     const a = lb.select("k").?;
     const b = lb.select("k").?;
     const c = lb.select("k").?;
-    try std.testing.expect(a.addr.eql(backends[0].addr));
-    try std.testing.expect(b.addr.eql(backends[1].addr));
-    try std.testing.expect(c.addr.eql(backends[0].addr));
+    try std.testing.expect(std.Io.net.IpAddress.eql(&a.addr, &backends[0].addr));
+    try std.testing.expect(std.Io.net.IpAddress.eql(&b.addr, &backends[1].addr));
+    try std.testing.expect(std.Io.net.IpAddress.eql(&c.addr, &backends[0].addr));
 }
 
 test "RoundRobin respects weight" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var backends = [_]Backend{
         try Backend.newWithWeight("127.0.0.1:9000", 3),
         try Backend.newWithWeight("127.0.0.1:9001", 1),
@@ -283,14 +285,14 @@ test "RoundRobin respects weight" {
     var count1: usize = 0;
     for (0..40) |_| {
         const b = lb.select("k").?;
-        if (b.addr.getPort() == 9000) count0 += 1 else count1 += 1;
+        if (std.Io.net.IpAddress.getPort(b.addr) == 9000) count0 += 1 else count1 += 1;
     }
     try std.testing.expectEqual(@as(usize, 30), count0);
     try std.testing.expectEqual(@as(usize, 10), count1);
 }
 
 test "FNVHash deterministic for same key" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var backends = [_]Backend{
         try Backend.new("127.0.0.1:9000"),
         try Backend.new("127.0.0.1:9001"),
@@ -300,11 +302,11 @@ test "FNVHash deterministic for same key" {
     defer lb.deinit();
     const a = lb.select("testkey").?;
     const b = lb.select("testkey").?;
-    try std.testing.expect(a.addr.eql(b.addr));
+    try std.testing.expect(std.Io.net.IpAddress.eql(&a.addr, &b.addr));
 }
 
 test "Consistent distributes and is stable" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var backends = [_]Backend{
         try Backend.new("127.0.0.1:9000"),
         try Backend.new("127.0.0.1:9001"),
@@ -314,13 +316,13 @@ test "Consistent distributes and is stable" {
     defer lb.deinit();
     const a = lb.select("hello").?;
     const b = lb.select("hello").?;
-    try std.testing.expect(a.addr.eql(b.addr));
+    try std.testing.expect(std.Io.net.IpAddress.eql(&a.addr, &b.addr));
     var seen = [_]bool{ false, false, false };
     for (0..300) |i| {
         var k: [4]u8 = undefined;
         std.mem.writeInt(u32, &k, i, .little);
         const b_ = lb.select(&k) orelse continue;
-        const p = b_.addr.getPort();
+        const p = std.Io.net.IpAddress.getPort(b_.addr);
         const idx: usize = p - 9000;
         if (idx < seen.len) seen[idx] = true;
     }

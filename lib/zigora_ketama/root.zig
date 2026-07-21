@@ -2,7 +2,7 @@
 //! load-balancer's `Consistent` selector. See V0.2_ROADMAP.md phase 1.4.
 //!
 //! Lazy port: V1 only (no v2 packed repr), 160 points per weight, CRC32.
-//! Uses `std.net.Address` instead of Rust `SocketAddr`. `node()` lookup is
+//! Uses `std.Io.net.IpAddress` instead of Rust `SocketAddr`. `node()` lookup is
 //! a binary search; wrap to ring head on miss.
 
 const std = @import("std");
@@ -13,11 +13,11 @@ pub const DEFAULT_POINT_MULTIPLE: u32 = 160;
 
 /// A backend server with a weight. Higher weight → more hash points.
 pub const Bucket = struct {
-    node: std.net.Address,
+    node: std.Io.net.IpAddress,
     weight: u32,
 
-    pub fn new(node: std.net.Address, weight: u32) Bucket {
-        std.debug.assert(weight != 0, "ketama weight must be > 0", .{});
+    pub fn new(node: std.Io.net.IpAddress, weight: u32) Bucket {
+        std.debug.assert(weight != 0);
         return .{ .node = node, .weight = weight };
     }
 };
@@ -30,7 +30,7 @@ const Point = struct {
 
 pub const Continuum = struct {
     ring: []Point,
-    addrs: []std.net.Address,
+    addrs: []std.Io.net.IpAddress,
     allocator: std.mem.Allocator,
 
     /// Build a ring from `buckets`. The caller owns `buckets`; this copies.
@@ -46,7 +46,7 @@ pub const Continuum = struct {
 
         var ring = try std.ArrayList(Point).initCapacity(allocator, total_points);
         errdefer ring.deinit(allocator);
-        var addrs = try std.ArrayList(std.net.Address).initCapacity(allocator, buckets.len);
+        var addrs = try std.ArrayList(std.Io.net.IpAddress).initCapacity(allocator, buckets.len);
         errdefer addrs.deinit(allocator);
 
         for (buckets) |b| {
@@ -60,7 +60,7 @@ pub const Continuum = struct {
             var prev_hash: u32 = 0;
             const num_points = b.weight * DEFAULT_POINT_MULTIPLE;
             for (0..num_points) |_| {
-                var hasher = std.hash.Crc32{};
+                var hasher = std.hash.Crc32.init();
                 hasher.update(base_buf[0..base_len]);
                 hasher.update(std.mem.asBytes(&prev_hash));
                 const h = hasher.final();
@@ -77,7 +77,7 @@ pub const Continuum = struct {
             ring.items[write] = p;
             write += 1;
         }
-        ring.shrinkRetainingCapacity(allocator, write);
+        ring.shrinkRetainingCapacity(write);
 
         return .{
             .ring = try ring.toOwnedSlice(allocator),
@@ -108,7 +108,7 @@ pub const Continuum = struct {
     }
 
     /// Look up the node for `key`.
-    pub fn node(self: *const Continuum, key: []const u8) ?std.net.Address {
+    pub fn node(self: *const Continuum, key: []const u8) ?std.Io.net.IpAddress {
         if (self.ring.len == 0) return null;
         const idx = self.nodeIdx(key);
         return self.addrs[self.ring[idx].node];
@@ -117,7 +117,7 @@ pub const Continuum = struct {
     /// Iterate distinct nodes starting from the ring point for `key`.
     /// Useful for failover — get the next non-duplicate node.
     /// Returns the next node address and updates `*idx` for the caller.
-    pub fn getAddr(self: *const Continuum, idx: *usize) ?std.net.Address {
+    pub fn getAddr(self: *const Continuum, idx: *usize) ?std.Io.net.IpAddress {
         if (self.ring.len == 0) return null;
         const p = self.ring[idx.*];
         idx.* = (idx.* + 1) % self.ring.len;
@@ -130,39 +130,38 @@ fn pointLessThan(_: void, a: Point, b: Point) bool {
 }
 
 /// Format "IP\0PORT" into `out`, return length used.
-fn formatHashBase(out: []u8, addr: std.net.Address) usize {
-    var stream = std.io.fixedBufferStream(out);
-    const w = stream.writer();
-    addr.format("", .{}, w) catch {};
+fn formatHashBase(out: []u8, addr: std.Io.net.IpAddress) usize {
+    var w = std.Io.Writer.fixed(out);
+    std.Io.net.IpAddress.format(addr, &w) catch {};
     w.writeByte(0) catch {};
-    return stream.pos;
+    return w.end;
 }
 
 // ===== Tests =====
 
 test "Continuum empty buckets returns null" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try Continuum.init(alc, &.{});
     defer c.deinit();
-    try std.testing.expectEqual(@as(?std.net.Address, null), c.node("anything"));
+    try std.testing.expectEqual(@as(?std.Io.net.IpAddress, null), c.node("anything"));
 }
 
 test "Continuum consistency after adding host" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var buckets1: [10]Bucket = undefined;
     for (&buckets1, 1..) |*b, i| {
-        b.* = Bucket.new(std.net.Address.parseIp4("127.0.0.1", @intCast(6443 + i)) catch unreachable, 1);
+        b.* = Bucket.new(std.Io.net.IpAddress.parseIp4("127.0.0.1", @intCast(6443 + i)) catch unreachable, 1);
     }
     var c1 = try Continuum.init(alc, &buckets1);
     defer c1.deinit();
 
-    const a = c1.node("a") orelse return error.NoNode;
-    const b = c1.node("b") orelse return error.NoNode;
+    _ = c1.node("a") orelse return error.NoNode;
+    _ = c1.node("b") orelse return error.NoNode;
 
     // Add one more host, ensure 'a' and 'b' still hit the same node
     var buckets2: [11]Bucket = undefined;
     for (&buckets2, 1..) |*b2, i| {
-        b2.* = Bucket.new(std.net.Address.parseIp4("127.0.0.1", @intCast(6443 + i)) catch unreachable, 1);
+        b2.* = Bucket.new(std.Io.net.IpAddress.parseIp4("127.0.0.1", @intCast(6443 + i)) catch unreachable, 1);
     }
     var c2 = try Continuum.init(alc, &buckets2);
     defer c2.deinit();
@@ -174,10 +173,10 @@ test "Continuum consistency after adding host" {
 }
 
 test "Continuum hash distribution hits all nodes" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var buckets: [3]Bucket = undefined;
     for (&buckets, 0..) |*b, i| {
-        b.* = Bucket.new(std.net.Address.parseIp4("127.0.0.1", @intCast(9000 + i)) catch unreachable, 1);
+        b.* = Bucket.new(std.Io.net.IpAddress.parseIp4("127.0.0.1", @intCast(9000 + i)) catch unreachable, 1);
     }
     var c = try Continuum.init(alc, &buckets);
     defer c.deinit();
@@ -187,7 +186,7 @@ test "Continuum hash distribution hits all nodes" {
         var k: [4]u8 = undefined;
         std.mem.writeInt(u32, &k, i, .little);
         const addr = c.node(&k) orelse continue;
-        const port = addr.getPort();
+        const port = std.Io.net.IpAddress.getPort(addr);
         const idx: usize = @intCast(port - 9000);
         if (idx < seen.len) seen[idx] = true;
     }
@@ -195,10 +194,10 @@ test "Continuum hash distribution hits all nodes" {
 }
 
 test "Continuum getAddr iterates and wraps" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var buckets: [2]Bucket = undefined;
     for (&buckets, 0..) |*b, i| {
-        b.* = Bucket.new(std.net.Address.parseIp4("127.0.0.1", @intCast(9000 + i)) catch unreachable, 1);
+        b.* = Bucket.new(std.Io.net.IpAddress.parseIp4("127.0.0.1", @intCast(9000 + i)) catch unreachable, 1);
     }
     var c = try Continuum.init(alc, &buckets);
     defer c.deinit();

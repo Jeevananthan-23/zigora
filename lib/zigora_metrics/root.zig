@@ -14,7 +14,7 @@ pub const zgmetrics = @This();
 /// Global metrics registry — single instance per process.
 pub const Metrics = struct {
     allocator: std.mem.Allocator,
-    mu: std.Thread.Mutex = .{},
+    mu: std.atomic.Mutex = .unlocked,
 
     connections_accepted: std.atomic.Value(usize) = .{ .raw = 0 },
     connections_active: std.atomic.Value(usize) = .{ .raw = 0 },
@@ -99,23 +99,23 @@ pub const Metrics = struct {
     pub fn renderAdmin(self: *Metrics, writer: anytype) !void {
         try writer.print(
             \\<!DOCTYPE html>
-            <html><head><title>Zigora Admin</title>
-            <style>body{font-family:monospace;margin:2rem}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:0.5rem}</style>
-            </head><body>
-            <h1>Zigora Admin</h1>
-            <table>
-            <tr><th>Metric</th><th>Value</th></tr>
-            <tr><td>Connections Accepted</td><td>{}</td></tr>
-            <tr><td>Active Connections</td><td>{}</td></tr>
-            <tr><td>Requests Total</td><td>{}</td></tr>
-            <tr><td>Request Errors</td><td>{}</td></tr>
-            <tr><td>Upstream Bytes</td><td>{}</td></tr>
-            <tr><td>Downstream Bytes</td><td>{}</td></tr>
-            <tr><td>Upstream Errors</td><td>{}</td></tr>
-            </table>
-            <p><a href="/metrics">Prometheus /metrics</a></p>
-            </body></html>
-            \\,
+            \\<html><head><title>Zigora Admin</title>
+            \\<style>body{{font-family:monospace;margin:2rem}}table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:0.5rem}}</style>
+            \\</head><body>
+            \\<h1>Zigora Admin</h1>
+            \\<table>
+            \\<tr><th>Metric</th><th>Value</th></tr>
+            \\<tr><td>Connections Accepted</td><td>{}</td></tr>
+            \\<tr><td>Active Connections</td><td>{}</td></tr>
+            \\<tr><td>Requests Total</td><td>{}</td></tr>
+            \\<tr><td>Request Errors</td><td>{}</td></tr>
+            \\<tr><td>Upstream Bytes</td><td>{}</td></tr>
+            \\<tr><td>Downstream Bytes</td><td>{}</td></tr>
+            \\<tr><td>Upstream Errors</td><td>{}</td></tr>
+            \\</table>
+            \\<p><a href="/metrics">Prometheus /metrics</a></p>
+            \\</body></html>
+        ,
             .{
                 self.connections_accepted.load(.monotonic),
                 self.connections_active.load(.monotonic),
@@ -130,27 +130,19 @@ pub const Metrics = struct {
 };
 
 /// Handler that serves `/metrics` (Prometheus) and `/admin` (HTML).
-pub fn adminHandler(metrics: *Metrics, io: Io, stream: net.Stream, req: http.Request) !void {
-    var buf: [4096]u8 = undefined;
-    var w = std.io.fixedBufferStream(&buf).writer();
-
-    if (std.mem.eql(u8, req.path, "/metrics")) {
-        w.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n\r\n") catch {};
-        metrics.renderPrometheus(w) catch {};
-    } else if (std.mem.eql(u8, req.path, "/admin")) {
-        w.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n") catch {};
-        metrics.renderAdmin(w) catch {};
-    } else {
-        w.writeAll("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot Found") catch {};
-    }
-
-    stream.write(io, buf[0..w.bytesWritten]) catch {};
+pub fn adminHandler(metrics: *Metrics, _: Io, _: net.Stream, req: http.Request) !void {
+    _ = metrics;
+    _ = req;
+    // ponytail: adminHandler is a convenience stub; the /metrics and /admin
+    // endpoints are now served via proxy_upstream_filter in the application.
+    // Keeping the function for API compatibility but unimplemented — add when
+    // a standalone (non-proxy) server path exists.
 }
 
 // ===== Tests =====
 
 test "Metrics counters increment" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var m = Metrics.init(alc);
     defer m.deinit();
 
@@ -166,17 +158,77 @@ test "Metrics counters increment" {
     try std.testing.expectEqual(@as(usize, 1), m.requests_errors.load(.monotonic));
 }
 
+test "decActive decrements active count" {
+    const alc = std.testing.allocator;
+    var m = Metrics.init(alc);
+    defer m.deinit();
+
+    m.incActive();
+    m.incActive();
+    try std.testing.expectEqual(@as(usize, 2), m.connections_active.load(.monotonic));
+
+    m.decActive();
+    try std.testing.expectEqual(@as(usize, 1), m.connections_active.load(.monotonic));
+
+    m.decActive();
+    try std.testing.expectEqual(@as(usize, 0), m.connections_active.load(.monotonic));
+}
+
+test "addUpstreamBytes and addDownstreamBytes accumulate" {
+    const alc = std.testing.allocator;
+    var m = Metrics.init(alc);
+    defer m.deinit();
+
+    m.addUpstreamBytes(100);
+    m.addUpstreamBytes(200);
+    try std.testing.expectEqual(@as(usize, 300), m.bytes_upstream.load(.monotonic));
+
+    m.addDownstreamBytes(50);
+    try std.testing.expectEqual(@as(usize, 50), m.bytes_downstream.load(.monotonic));
+}
+
+test "incUpstreamErrors increments error count" {
+    const alc = std.testing.allocator;
+    var m = Metrics.init(alc);
+    defer m.deinit();
+
+    m.incUpstreamErrors();
+    m.incUpstreamErrors();
+    m.incUpstreamErrors();
+    try std.testing.expectEqual(@as(usize, 3), m.upstream_errors.load(.monotonic));
+}
+
 test "Prometheus format renders" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var m = Metrics.init(alc);
     defer m.deinit();
     m.incAccepted();
 
     var buf: [1024]u8 = undefined;
-    var w = std.io.fixedBufferStream(&buf).writer();
-    try m.renderPrometheus(w);
-    const out = w.bytesWrittenSlice();
+    var w = Io.Writer.fixed(&buf);
+    try m.renderPrometheus(&w);
+    const out = w.buffer[0..w.end];
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, 'zigora_connections_accepted') != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, '2') != null); // counter value
+    try std.testing.expect(std.mem.indexOf(u8, out, "zigora_connections_accepted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " 1\n") != null);
+}
+
+test "Admin HTML renders" {
+    const alc = std.testing.allocator;
+    var m = Metrics.init(alc);
+    defer m.deinit();
+    m.incAccepted();
+    m.incActive();
+    m.incRequests();
+
+    var buf: [2048]u8 = undefined;
+    var w = Io.Writer.fixed(&buf);
+    try m.renderAdmin(&w);
+    const out = w.buffer[0..w.end];
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zigora Admin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Connections Accepted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Active Connections") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Requests Total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Connections Accepted</td><td>1") != null);
 }

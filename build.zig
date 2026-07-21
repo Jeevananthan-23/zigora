@@ -138,6 +138,16 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zigora-http", .module = http_mod },
                 .{ .name = "zigora-proxy", .module = proxy_mod },
                 .{ .name = "zigora-error", .module = error_mod },
+                .{ .name = "zigora-limits", .module = limits_mod },
+                .{ .name = "zigora-lru", .module = lru_mod },
+                .{ .name = "zigora-ketama", .module = ketama_mod },
+                .{ .name = "zigora-tinyufo", .module = tinyufo_mod },
+                .{ .name = "zigora-pool", .module = pool_mod },
+                .{ .name = "zigora-memory-cache", .module = memcache_mod },
+                .{ .name = "zigora-lb", .module = lb_mod },
+                .{ .name = "zigora-cache", .module = cache_mod },
+                .{ .name = "zigora-tls", .module = tls_mod },
+                .{ .name = "zigora-metrics", .module = metrics_mod },
             },
         }),
     });
@@ -151,13 +161,60 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // --- Examples ---
+    const ex_name = "simple_proxy";
+    const ex = b.addExecutable(.{
+        .name = ex_name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/" ++ ex_name ++ "/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigora-core", .module = core_mod },
+                .{ .name = "zigora-http", .module = http_mod },
+                .{ .name = "zigora-proxy", .module = proxy_mod },
+                .{ .name = "zigora-error", .module = error_mod },
+                .{ .name = "zigora-lb", .module = lb_mod },
+                .{ .name = "zigora-metrics", .module = metrics_mod },
+            },
+        }),
+    });
+    b.installArtifact(ex);
+    const run_ex = b.step("example-" ++ ex_name, "Run example: " ++ ex_name);
+    const run_ex_cmd = b.addRunArtifact(ex);
+    run_ex.dependOn(&run_ex_cmd.step);
+    run_ex_cmd.step.dependOn(b.getInstallStep());
+
+    const ex2_name = "load_balancer";
+    const ex2 = b.addExecutable(.{
+        .name = ex2_name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/" ++ ex2_name ++ "/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigora-core", .module = core_mod },
+                .{ .name = "zigora-http", .module = http_mod },
+                .{ .name = "zigora-proxy", .module = proxy_mod },
+                .{ .name = "zigora-error", .module = error_mod },
+                .{ .name = "zigora-lb", .module = lb_mod },
+                .{ .name = "zigora-metrics", .module = metrics_mod },
+            },
+        }),
+    });
+    b.installArtifact(ex2);
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const metrics_tests = b.addTest(.{ .root_module = metrics_mod, .name = "zigora-metrics" });
+    const run_metrics_tests = b.addRunArtifact(metrics_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_metrics_tests.step);
 }

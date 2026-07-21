@@ -10,57 +10,66 @@
 const std = @import("std");
 const zglru = @This();
 
+// ponytail: spinlock wrapping std.atomic.Mutex for old std.Thread.Mutex API.
+const Mutex = struct {
+    state: std.atomic.Mutex = .unlocked,
+    pub fn lock(m: *Mutex) void { while (!std.atomic.Mutex.tryLock(&m.state)) {} }
+    pub fn unlock(m: *Mutex) void { std.atomic.Mutex.unlock(&m.state); }
+};
+
 pub fn Lru(comptime T: type, comptime N: usize) type {
     return struct {
-        shards: [N]Shard,
+        shards__: [N]Shard,
         weight_limit: usize,
-        weight: std.atomic.Value(usize) = .{ .raw = 0 },
-        len: std.atomic.Value(usize) = .{ .raw = 0 },
+        weight_: std.atomic.Value(usize) = .{ .raw = 0 },
+        len_: std.atomic.Value(usize) = .{ .raw = 0 },
         allocator: std.mem.Allocator,
 
         pub const Shard = struct {
             unit: Unit,
-            mu: std.Thread.Mutex = .{},
+            mu: Mutex = .{},
 
             pub const Unit = struct {
-                lookup: std.AutoArrayHashMap(u64, Node),
+                lookup: std.AutoArrayHashMapUnmanaged(u64, Node),
                 order: std.ArrayList(u64), // head=MRU, tail=LRU
+                allocator: std.mem.Allocator,
                 used_weight: usize = 0,
 
                 pub fn init(allocator: std.mem.Allocator, cap: usize) Unit {
-                    var lookup = std.AutoArrayHashMap(u64, Node).init(allocator);
-                    lookup.ensureTotalCapacity(cap) catch {};
+                    var lookup = std.AutoArrayHashMapUnmanaged(u64, Node){};
+                    lookup.ensureTotalCapacity(allocator, cap) catch {};
                     return .{
                         .lookup = lookup,
                         .order = .empty,
+                        .allocator = allocator,
                     };
                 }
 
-                pub fn deinit(self: *Unit, allocator: std.mem.Allocator) void {
-                    self.lookup.deinit();
-                    self.order.deinit(allocator);
+                pub fn deinit(self: *Unit) void {
+                    self.lookup.deinit(self.allocator);
+                    self.order.deinit(self.allocator);
                 }
 
                 /// Promote `key` to MRU. Returns true if key was present.
                 pub fn access(self: *Unit, key: u64) bool {
                     if (!self.lookup.contains(key)) return false;
                     self.removeFromOrder(key);
-                    self.order.append(self.lookup.allocator, key) catch {};
+                    self.order.append(self.allocator, key) catch {};
                     return true;
                 }
 
                 /// Insert `key` at MRU. Replaces existing entry's data/weight.
                 /// Returns previous weight (0 if new).
-                pub fn admit(self: *Unit, key: u64, data: T, weight: usize) usize {
-                    const w = @max(weight, 1);
+                pub fn admit(self: *Unit, key: u64, data: T, wgt: usize) usize {
+                    const w = @max(wgt, 1);
                     if (self.lookup.get(key)) |node| {
                         const old = node.weight;
-                        self.lookup.put(key, .{ .data = data, .weight = w }) catch {};
+                        self.lookup.put(self.allocator, key, .{ .data = data, .weight = w }) catch {};
                         self.used_weight = self.used_weight - old + w;
                         return old;
                     }
-                    self.lookup.put(key, .{ .data = data, .weight = w }) catch {};
-                    self.order.append(self.lookup.allocator, key) catch {};
+                    self.lookup.put(self.allocator, key, .{ .data = data, .weight = w }) catch {};
+                    self.order.append(self.allocator, key) catch {};
                     self.used_weight += w;
                     return 0;
                 }
@@ -122,11 +131,11 @@ pub fn Lru(comptime T: type, comptime N: usize) type {
         pub fn init(allocator: std.mem.Allocator, weight_limit: usize, capacity: usize) !Lru(T, N) {
             var shards: [N]Shard = undefined;
             for (&shards) |*s| s.* = .{ .unit = Shard.Unit.init(allocator, capacity) };
-            return .{ .shards = shards, .weight_limit = weight_limit, .allocator = allocator };
+            return .{ .shards__ = shards, .weight_limit = weight_limit, .allocator = allocator };
         }
 
         pub fn deinit(self: *Lru(T, N)) void {
-            for (&self.shards) |*s| s.unit.deinit(self.allocator);
+            for (&self.shards__) |*s| s.unit.deinit();
         }
 
         /// `key % N` is the shard index — simple, no hash mixing needed
@@ -137,18 +146,18 @@ pub fn Lru(comptime T: type, comptime N: usize) type {
         }
 
         /// Admit an item to the LRU. Returns the shard index.
-        pub fn admit(self: *Lru(T, N), key: u64, data: T, weight: usize) usize {
+        pub fn admit(self: *Lru(T, N), key: u64, data: T, wgt: usize) usize {
             const idx = self.shardFor(key);
-            const w = @max(weight, 1);
-            self.shards[idx].mu.lock();
-            defer self.shards[idx].mu.unlock();
-            const old = self.shards[idx].unit.admit(key, data, w);
+            const w = @max(wgt, 1);
+            self.shards__[idx].mu.lock();
+            defer self.shards__[idx].mu.unlock();
+            const old = self.shards__[idx].unit.admit(key, data, w);
             if (old != w) {
-                _ = self.weight.fetchAdd(w, .monotonic);
+                _ = self.weight_.fetchAdd(w, .monotonic);
                 if (old > 0) {
-                    _ = self.weight.fetchSub(old, .monotonic);
+                    _ = self.weight_.fetchSub(old, .monotonic);
                 } else {
-                    _ = self.len.fetchAdd(1, .monotonic);
+                    _ = self.len_.fetchAdd(1, .monotonic);
                 }
             }
             return idx;
@@ -157,30 +166,30 @@ pub fn Lru(comptime T: type, comptime N: usize) type {
         /// Promote key to MRU. Returns true if key was present.
         pub fn promote(self: *Lru(T, N), key: u64) bool {
             const idx = self.shardFor(key);
-            self.shards[idx].mu.lock();
-            defer self.shards[idx].mu.unlock();
-            return self.shards[idx].unit.access(key);
+            self.shards__[idx].mu.lock();
+            defer self.shards__[idx].mu.unlock();
+            return self.shards__[idx].unit.access(key);
         }
 
         /// Remove `key`. Returns (T, weight) if present.
         pub fn remove(self: *Lru(T, N), key: u64) ?struct { data: T, weight: usize } {
             const idx = self.shardFor(key);
-            self.shards[idx].mu.lock();
-            defer self.shards[idx].mu.unlock();
-            const r = self.shards[idx].unit.remove(key) orelse return null;
-            _ = self.weight.fetchSub(r.weight, .monotonic);
-            _ = self.len.fetchSub(1, .monotonic);
+            self.shards__[idx].mu.lock();
+            defer self.shards__[idx].mu.unlock();
+            const r = self.shards__[idx].unit.remove(key) orelse return null;
+            _ = self.weight_.fetchSub(r.weight, .monotonic);
+            _ = self.len_.fetchSub(1, .monotonic);
             return r;
         }
 
         /// Evict one item from the given shard. Ponytail: Pingora evicts
         /// random shards; here the caller picks.
         pub fn evictShard(self: *Lru(T, N), shard: usize) ?struct { data: T, weight: usize } {
-            self.shards[shard].mu.lock();
-            defer self.shards[shard].mu.unlock();
-            const r = self.shards[shard].unit.evict() orelse return null;
-            _ = self.weight.fetchSub(r.weight, .monotonic);
-            _ = self.len.fetchSub(1, .monotonic);
+            self.shards__[shard].mu.lock();
+            defer self.shards__[shard].mu.unlock();
+            const r = self.shards__[shard].unit.evict() orelse return null;
+            _ = self.weight_.fetchSub(r.weight, .monotonic);
+            _ = self.len_.fetchSub(1, .monotonic);
             return .{ .data = r.data, .weight = r.weight };
         }
 
@@ -188,8 +197,8 @@ pub fn Lru(comptime T: type, comptime N: usize) type {
         pub fn evictToLimit(self: *Lru(T, N), allocator: std.mem.Allocator) ![]struct { data: T, weight: usize } {
             var out: std.ArrayList(struct { data: T, weight: usize }) = .empty;
             var empty_shards: usize = 0;
-            var seed: usize = std.crypto.random.int(usize) % N;
-            while (self.weight.fetchLoad(.monotonic) > self.weight_limit and empty_shards < N) {
+            var seed: usize = 0; // ponytail: deterministic eviction order
+            while (self.weight_.fetchLoad(.monotonic) > self.weight_limit and empty_shards < N) {
                 if (self.evictShard(seed)) |e| {
                     try out.append(allocator, e);
                 } else {
@@ -202,34 +211,32 @@ pub fn Lru(comptime T: type, comptime N: usize) type {
 
         pub fn peek(self: *Lru(T, N), key: u64) ?T {
             const idx = self.shardFor(key);
-            self.shards[idx].mu.lock();
-            defer self.shards[idx].mu.unlock();
-            return self.shards[idx].unit.peek(key);
+            self.shards__[idx].mu.lock();
+            defer self.shards__[idx].mu.unlock();
+            return self.shards__[idx].unit.peek(key);
         }
 
         pub fn peekWeight(self: *Lru(T, N), key: u64) ?usize {
             const idx = self.shardFor(key);
-            self.shards[idx].mu.lock();
-            defer self.shards[idx].mu.unlock();
-            return self.shards[idx].unit.peekWeight(key);
+            self.shards__[idx].mu.lock();
+            defer self.shards__[idx].mu.unlock();
+            return self.shards__[idx].unit.peekWeight(key);
         }
 
         pub fn weight(self: *const Lru(T, N)) usize {
-            return self.weight.load(.monotonic);
+            return self.weight_.load(.monotonic);
         }
 
         pub fn lenFn(self: *const Lru(T, N)) usize {
-            return self.len.load(.monotonic);
+            return self.len_.load(.monotonic);
         }
-
-        pub const shards = N;
     };
 }
 
 // ===== Tests =====
 
 test "Lru admit + peek + weight" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var lru = try Lru(u32, 4).init(alc, 100, 8);
     defer lru.deinit();
     _ = lru.admit(1, 100, 10);
@@ -241,7 +248,7 @@ test "Lru admit + peek + weight" {
 }
 
 test "Lru admit replaces weight" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var lru = try Lru(u32, 2).init(alc, 1000, 16);
     defer lru.deinit();
     _ = lru.admit(1, 10, 5);
@@ -252,7 +259,7 @@ test "Lru admit replaces weight" {
 }
 
 test "Lru promote moves LRU" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var lru = try Lru(u32, 1).init(alc, 1000, 8);
     defer lru.deinit();
     _ = lru.admit(1, 11, 1);
@@ -266,7 +273,7 @@ test "Lru promote moves LRU" {
 }
 
 test "Lru evictToLimit evicts oldest until under weight" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var lru = try Lru(u32, 2).init(alc, 10, 8);
     defer lru.deinit();
     _ = lru.admit(1, 100, 5);
@@ -279,7 +286,7 @@ test "Lru evictToLimit evicts oldest until under weight" {
 }
 
 test "Lru remove" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var lru = try Lru(u32, 2).init(alc, 1000, 8);
     defer lru.deinit();
     _ = lru.admit(7, 700, 3);

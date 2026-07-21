@@ -246,7 +246,7 @@ pub const EvictionManager = struct {
 
     pub const VTable = struct {
         /// Admit a new asset. Returns keys (hash64) that were evicted.
-        admit: *const fn (*anyopaque, hash64: u64, size: usize, fresh_until_ns: i128, allocator: std.mem.Allocator) !?[]const u64,
+        admit: *const fn (*anyopaque, hash64: u64, size: usize, fresh_until_ns: i128, allocator: std.mem.Allocator) ?[]const u64,
         /// Record that the asset was recently accessed.
         access: *const fn (*anyopaque, hash64: u64) void,
     };
@@ -300,4 +300,58 @@ test "HitStatus fresh checks" {
 test "NoCacheReason asStr" {
     try std.testing.expectEqualStrings("origin_not_cache", NoCacheReason.origin_not_cache.asStr());
     try std.testing.expectEqualStrings("storage_error", NoCacheReason.storage_error.asStr());
+}
+
+// --- integration tests ---
+
+test "integration: CacheMeta holds ResponseHeader from zigora_http" {
+    var hdr_buf: [64]u8 = undefined;
+    const raw = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    @memcpy(hdr_buf[0..raw.len], raw);
+    const resp = try http.ResponseHeader.parse(hdr_buf[0..raw.len]);
+    const meta: CacheMeta = .{
+        .header = resp,
+        .created_ns = 100,
+        .updated_ns = 200,
+        .fresh_until_ns = 300,
+    };
+    try std.testing.expectEqual(@as(u16, 200), meta.header.status_code);
+    try std.testing.expectEqualStrings("OK", meta.header.reason_phrase.?);
+    try std.testing.expect(meta.created_ns < meta.updated_ns);
+}
+
+test "integration: RespCacheable wraps a CacheMeta built from real http parse" {
+    var buf: [64]u8 = undefined;
+    const raw = "HTTP/1.1 404 Not Found\r\n\r\n";
+    @memcpy(buf[0..raw.len], raw);
+    const resp = try http.ResponseHeader.parse(buf[0..raw.len]);
+    const rc: RespCacheable = .{ .cacheable = .{
+        .header = resp,
+        .created_ns = 10,
+        .updated_ns = 10,
+        .fresh_until_ns = 100,
+    } };
+    try std.testing.expect(rc.isCacheable());
+    const unc: RespCacheable = .{ .uncacheable = .origin_not_cache };
+    try std.testing.expect(!unc.isCacheable());
+}
+
+test "integration: HttpCache phase-disabled with NeverEnabled variant" {
+    const c: HttpCache = .{ .phase = .{ .disabled = .never_enabled } };
+    try std.testing.expect(!c.phase.isEnabled());
+    try std.testing.expectEqualStrings("disabled", c.phase.asStr());
+}
+
+test "integration: cache CachePhase wraps http ResponseHeader for status 500" {
+    var buf: [64]u8 = undefined;
+    const raw = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+    @memcpy(buf[0..raw.len], raw);
+    const resp = try http.ResponseHeader.parse(buf[0..raw.len]);
+    const meta: CacheMeta = .{
+        .header = resp,
+        .created_ns = 0,
+        .updated_ns = 0,
+        .fresh_until_ns = 0,
+    };
+    try std.testing.expectEqual(@as(u16, 500), meta.header.status_code);
 }

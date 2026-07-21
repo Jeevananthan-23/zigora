@@ -48,7 +48,7 @@ pub fn accept(
 /// v0.2 stub: returns error.Unimplemented. v0.3: real impl.
 pub fn connect(
     io: Io,
-    addr: std.net.Address,
+    addr: std.Io.net.IpAddress,
     config: ClientConfig,
 ) HandshakeResult {
     _ = io;

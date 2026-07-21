@@ -15,6 +15,13 @@
 const std = @import("std");
 const zgtinyufo = @This();
 
+// ponytail: spinlock wrapping std.atomic.Mutex for old std.Thread.Mutex API.
+const Mutex = struct {
+    state: std.atomic.Mutex = .unlocked,
+    pub fn lock(m: *Mutex) void { while (!std.atomic.Mutex.tryLock(&m.state)) {} }
+    pub fn unlock(m: *Mutex) void { std.atomic.Mutex.unlock(&m.state); }
+};
+
 pub const Weight = u16;
 pub const Key = u64;
 const USES_CAP: u8 = 3;
@@ -46,7 +53,7 @@ pub fn TinyUfo(comptime T: type) type {
         const Self = @This();
 
         total_weight_limit: usize,
-        mu: std.Thread.Mutex = .{},
+        mu: Mutex = .{},
 
         // FIFO queues (head = oldest)
         small_keys: std.ArrayList(Key),
@@ -55,7 +62,7 @@ pub fn TinyUfo(comptime T: type) type {
         main_weight: usize = 0,
 
         // The actual key→bucket map
-        buckets: std.AutoArrayHashMap(Key, Bucket(T)),
+        buckets: std.AutoArrayHashMapUnmanaged(Key, Bucket(T)),
 
         // TinyLFU estimator: a tiny Count-Min sketch (1 row × N slots)
         lfu_slots: []std.atomic.Value(u32),
@@ -67,12 +74,12 @@ pub fn TinyUfo(comptime T: type) type {
             const slots = try allocator.alloc(std.atomic.Value(u32), slot_count);
             @memset(slots, std.atomic.Value(u32).init(0));
             var seeds: [4]u64 = undefined;
-            for (&seeds) |*s| s.* = std.crypto.random.int(u64);
+            for (&seeds, 0..) |*s, i| s.* = std.hash.Wyhash.hash(0xdeadbeef, std.mem.asBytes(&@as(u64, @intCast(i))));
             return .{
                 .total_weight_limit = total_weight_limit,
                 .small_keys = .empty,
                 .main_keys = .empty,
-                .buckets = std.AutoArrayHashMap(Key, Bucket(T)).init(allocator),
+                .buckets = .{},
                 .lfu_slots = slots,
                 .lfu_seeds = seeds,
                 .allocator = allocator,
@@ -83,7 +90,7 @@ pub fn TinyUfo(comptime T: type) type {
             self.allocator.free(self.lfu_slots);
             self.small_keys.deinit(self.allocator);
             self.main_keys.deinit(self.allocator);
-            self.buckets.deinit();
+            self.buckets.deinit(self.allocator);
         }
 
         // ---- TinyLFU frequency estimator (1-row CM sketch, min of 4 hashes) ----
@@ -181,17 +188,17 @@ pub fn TinyUfo(comptime T: type) type {
             }
 
             // Need to make room. Evict first.
-            var evicted = try self.evictToLimit(weight);
+            const evicted = try self.evictToLimit(weight);
             // TinyLFU admission: if exactly one item was evicted, compare
             // prev_freq vs new_freq. More popular one stays.
             if (!force and evicted.len == 1) {
                 const ev_freq = self.lfuGet(evicted[0].key);
                 if (ev_freq > new_freq) {
                     // reject new item: put evicted one back, new item goes into evicted
-                    var returned = try self.allocator.alloc(KV(T), 1);
+                    const returned = try self.allocator.alloc(KV(T), 1);
                     returned[0] = .{ .key = key, .data = data, .weight = weight };
                     // re-insert evicted item
-                    self.buckets.put(evicted[0].key, .{
+                    self.buckets.put(self.allocator, evicted[0].key, .{
                         .uses = 0,
                         .queue = .small,
                         .weight = evicted[0].weight,
@@ -204,7 +211,7 @@ pub fn TinyUfo(comptime T: type) type {
                 }
             }
 
-            self.buckets.put(key, .{
+            self.buckets.put(self.allocator, key, .{
                 .uses = 0,
                 .queue = .small,
                 .weight = weight,
@@ -226,7 +233,7 @@ pub fn TinyUfo(comptime T: type) type {
         }
 
         fn smallWeightLimit(self: *Self) usize {
-            return @intFromFloat(@floor(@as(f32, @floatFromInt(self.total_weight_limit)) * SMALL_PCT)) + 1;
+            return @as(usize, @as(comptime_float, @floor(@as(f32, @floatFromInt(self.total_weight_limit)) * SMALL_PCT)) + 1);
         }
 
         fn evictOne(self: *Self) !?KV(T) {
@@ -297,62 +304,72 @@ pub fn TinyUfo(comptime T: type) type {
 // ===== Tests =====
 
 test "TinyUfo basic get/put" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try TinyUfo(u32).init(alc, 100, 64);
     defer c.deinit();
-    var ev = try c.put(1, 11, 1);
+    const ev = try c.put(1, 11, 1);
     alc.free(ev);
     try std.testing.expectEqual(@as(?u32, 11), c.get(1));
     try std.testing.expectEqual(@as(?u32, null), c.get(2));
 }
 
 test "TinyUfo evicts when full" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try TinyUfo(u32).init(alc, 5, 8);
     defer c.deinit();
-    var e1 = try c.put(1, 1, 1); if (e1.len > 0) alc.free(e1);
-    var e2 = try c.put(2, 2, 2); if (e2.len > 0) alc.free(e2);
-    var e3 = try c.put(3, 3, 2); if (e3.len > 0) alc.free(e3);
+    const e1 = try c.put(1, 1, 1);
+    if (e1.len > 0) alc.free(e1);
+    const e2 = try c.put(2, 2, 2);
+    if (e2.len > 0) alc.free(e2);
+    const e3 = try c.put(3, 3, 2);
+    if (e3.len > 0) alc.free(e3);
     // total weight 5, full
-    var e4 = try c.put(4, 4, 3);
+    const e4 = try c.put(4, 4, 3);
     defer alc.free(e4);
     try std.testing.expect(e4.len >= 1);
     try std.testing.expect(c.totalWeight() <= 5);
 }
 
 test "TinyUfo promotes from small to main on second use" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try TinyUfo(u32).init(alc, 5, 8);
     defer c.deinit();
-    var e1 = try c.put(1, 1, 1); if (e1.len > 0) alc.free(e1);
-    var e2 = try c.put(2, 2, 2); if (e2.len > 0) alc.free(e2);
-    var e3 = try c.put(3, 3, 2); if (e3.len > 0) alc.free(e3);
+    const e1 = try c.put(1, 1, 1);
+    if (e1.len > 0) alc.free(e1);
+    const e2 = try c.put(2, 2, 2);
+    if (e2.len > 0) alc.free(e2);
+    const e3 = try c.put(3, 3, 2);
+    if (e3.len > 0) alc.free(e3);
     _ = c.get(1);
     _ = c.get(1); // bump uses to 2
     try std.testing.expectEqual(Location.small, c.peekQueue(1).?);
-    var e4 = try c.put(4, 4, 2); // triggers eviction from small
+    const e4 = try c.put(4, 4, 2); // triggers eviction from small
     defer alc.free(e4);
     // 1 should be promoted to main to escape eviction
     try std.testing.expectEqual(Location.main, c.peekQueue(1).?);
 }
 
 test "TinyUfo remove" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try TinyUfo(u32).init(alc, 100, 64);
     defer c.deinit();
-    var e1 = try c.put(7, 77, 1); if (e1.len > 0) alc.free(e1);
+    const e1 = try c.put(7, 77, 1);
+    if (e1.len > 0) alc.free(e1);
     try std.testing.expectEqual(@as(?u32, 77), c.remove(7));
     try std.testing.expectEqual(@as(?u32, null), c.get(7));
 }
 
 test "TinyUfo forcePut always admits" {
-    var alc = std.testing.allocator;
+    const alc = std.testing.allocator;
     var c = try TinyUfo(u32).init(alc, 5, 8);
     defer c.deinit();
-    var e1 = try c.put(1, 1, 1); if (e1.len > 0) alc.free(e1);
-    var e2 = try c.put(1, 1, 1); if (e2.len > 0) alc.free(e2);
-    var e3 = try c.put(1, 1, 1); if (e3.len > 0) alc.free(e3); // bump freq of 1
-    var ef = try c.forcePut(99, 99, 1); // force admit new key 99
+    const e1 = try c.put(1, 1, 1);
+    if (e1.len > 0) alc.free(e1);
+    const e2 = try c.put(1, 1, 1);
+    if (e2.len > 0) alc.free(e2);
+    const e3 = try c.put(1, 1, 1);
+    if (e3.len > 0) alc.free(e3); // bump freq of 1
+    const ef = try c.forcePut(99, 99, 1); // force admit new key 99
     if (ef.len > 0) alc.free(ef);
     try std.testing.expect(c.get(99) != null);
 }

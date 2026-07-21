@@ -37,6 +37,7 @@ pub const HttpPeer = struct {
 pub fn Session(comptime C: type) type {
     return struct {
         io: Io,
+        stream: Stream,
         request: http.Request,
         response: ?http.ResponseHeader = null,
         peer: HttpPeer,
@@ -85,8 +86,8 @@ pub fn ProxyHttp(comptime T: type) type {
             return T.new_ctx(self);
         }
 
-        pub fn upstreamPeer(self: *T, _: *Ctx) HttpPeer {
-            return T.upstream_peer(self);
+        pub fn upstreamPeer(self: *T, ctx: *Ctx) HttpPeer {
+            return T.upstream_peer(self, ctx);
         }
     };
 }
@@ -105,15 +106,19 @@ pub fn HttpProxy(comptime T: type) type {
 
         const Self = @This();
 
+        /// Wire callbacks declared on `T` into the vtable by name.
+        /// Each optional callback is checked with `@hasDecl` and wired if present.
+        /// New callbacks added here as needed — one explicit line beats comptime
+        /// type-matching that silently misses coercion nuances.
         pub fn init(impl: *T, backend: HttpPeer) Self {
-            return .{
-                .inner = impl,
-                .backend = backend,
-                .vtable = .{ .new_ctx = T.new_ctx },
-            };
+            var vt: V = .{ .new_ctx = T.new_ctx };
+            if (@hasDecl(T, "proxy_upstream_filter")) {
+                vt.proxy_upstream_filter = T.proxy_upstream_filter;
+            }
+            return .{ .inner = impl, .backend = backend, .vtable = vt };
         }
 
-        /// With v0.2 vtable callbacks — user passes an inline struct.
+        /// v0.2: full V table enables custom callbacks.
         pub fn initWith(impl: *T, backend: HttpPeer, vt: V) Self {
             return .{ .inner = impl, .backend = backend, .vtable = vt };
         }
@@ -146,6 +151,7 @@ pub fn HttpProxy(comptime T: type) type {
             // Build session
             var session = Session(Ctx){
                 .io = io,
+                .stream = stream,
                 .request = request,
                 .peer = peer,
                 .ctx = ctx,
@@ -294,4 +300,48 @@ test "ProxyHttpVTable can be built with only new_ctx" {
     const vt: ProxyHttpVTable(TestImpl, Ctx) = .{ .new_ctx = TestImpl.new_ctx };
     try std.testing.expect(vt.request_filter == null);
     try std.testing.expect(vt.proxy_upstream_filter == null);
+}
+
+// --- integration tests ---
+
+test "integration: Session wraps http.Request + peer" {
+    var buf: [64]u8 = undefined;
+    const raw = "GET /foo HTTP/1.1\r\nHost: x\r\n\r\n";
+    @memcpy(buf[0..raw.len], raw);
+    const req = try http.Request.parse(buf[0..raw.len]);
+    const sess = Session(Ctx){
+        .io = undefined,
+        .request = req,
+        .peer = .{ .host = "x", .port = 80 },
+        .ctx = .{},
+    };
+    try std.testing.expectEqual(http.Method.GET, sess.request.method);
+    try std.testing.expectEqualStrings("/foo", sess.request.path);
+    try std.testing.expectEqualStrings("x", sess.peer.host);
+    try std.testing.expectEqual(@as(usize, 0), sess.retries);
+}
+
+test "integration: ProxyHttpVTable all null callbacks — compatible with init" {
+    var impl = TestImpl{};
+    const vt: ProxyHttpVTable(TestImpl, Ctx) = .{ .new_ctx = TestImpl.new_ctx };
+    // no upstream_peer set → should fall through to v0.1 ProxyHttp.upstreamPeer
+    const hp = HttpProxy(TestImpl).initWith(&impl, .{ .host = "x", .port = 1 }, vt);
+    try std.testing.expectEqualStrings("x", hp.backend.host);
+}
+
+test "integration: http_proxy_service builds a Service handle recognized by core.Server" {
+    const alc = std.testing.allocator;
+    var impl = TestImpl{};
+    const svc = http_proxy_service(TestImpl, "int_svc", &impl, .{ .host = "x", .port = 1 });
+    try std.testing.expectEqualStrings("int_svc", svc.name);
+    var srv = core.Server.new(alc, .{});
+    defer srv.services.deinit(alc);
+    const SlotWrap = struct {
+        fn start(ptr: *anyopaque, _: Io, _: std.mem.Allocator) anyerror!void {
+            _ = ptr;
+        }
+    };
+    const handle = try srv.addService(.{ .name = svc.name, .start = SlotWrap.start, .userdata = @ptrCast(&svc) });
+    try std.testing.expectEqualStrings("int_svc", handle.name);
+    try std.testing.expectEqual(@as(usize, 0), handle.index);
 }

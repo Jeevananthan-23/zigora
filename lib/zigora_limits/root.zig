@@ -12,6 +12,13 @@
 const std = @import("std");
 const zglimits = @This();
 
+// ponytail: clock via global Io instead of removed std.time.milliTimestamp.
+// Upgrade to per-Io clock when the rest of the framework passes Io through.
+fn milliTimestamp() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.toMilliseconds(std.Io.Timestamp.now(io, .real));
+}
+
 /// Fast non-cryptographic hash — uses wyhash (Zig stdlib default).
 fn hashUsize(key: usize, seed: u64) u64 {
     var w = std.hash.Wyhash.init(seed);
@@ -44,7 +51,7 @@ pub const Estimator = struct {
             r.cells = try allocator.alloc(std.atomic.Value(isize), slots);
             // zero all cells
             @memset(r.cells, std.atomic.Value(isize).init(0));
-            r.seed = std.crypto.random.int(u64) ^ (@as(u64, i) *% 0x9e3779b97f4a7c15);
+            r.seed = i *% 0x9e3779b97f4a7c15 + 0xdeadbeef; // ponytail: deterministic seed, fine for CMS estimator
         }
         return .{ .rows = rows, .allocator = allocator };
     }
@@ -109,7 +116,7 @@ pub const Inflight = struct {
         // should share one estimator.
         const est = try allocator.create(Estimator);
         est.* = try Estimator.init(allocator, HASHES, SLOTS);
-        return .{ .estimator = est, .seed = std.crypto.random.int(u64) };
+        return .{ .estimator = est, .seed = 0xdeadbeef }; // ponytail: deterministic seed
     }
 
     pub fn deinit(self: *Inflight, allocator: std.mem.Allocator) void {
@@ -172,7 +179,7 @@ pub const Rate = struct {
             .red_slot = try Estimator.init(allocator, HASHES, SLOTS),
             .blue_slot = try Estimator.init(allocator, HASHES, SLOTS),
             .red_or_blue = std.atomic.Value(bool).init(true),
-            .start_ms = std.time.milliTimestamp(),
+            .start_ms = milliTimestamp(),
             .reset_interval_ms = interval_ms,
             .last_reset_time = std.atomic.Value(u64).init(0),
         };
@@ -193,7 +200,7 @@ pub const Rate = struct {
 
     /// Reset if enough time has passed. Returns ms since last reset.
     fn maybeReset(self: *Rate) u64 {
-        const now = @as(u64, @intCast(@as(i64, @truncate(std.time.milliTimestamp() - self.start_ms))));
+        const now = @as(u64, @intCast(@as(i64, @truncate(milliTimestamp() - self.start_ms))));
         const last = self.last_reset_time.load(.seq_cst);
         const past = now -% last;
         if (past < self.reset_interval_ms) return past;
@@ -298,6 +305,52 @@ test "Rate returns 0 after 2+ missed intervals" {
     var r = try Rate.init(alc, 50);
     defer r.deinit();
     _ = r.observe(1, 10);
-    std.time.sleep(150 * std.time.ns_per_ms); // 3 intervals
+    std.time.sleep(150 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(f64, 0), r.rate(1));
+}
+
+// --- integration tests ---
+
+test "integration: Estimator aliasing — multi-key incr minimal collision rate" {
+    const alc = std.testing.allocator;
+    var est = try Estimator.init(alc, 8, 1024);
+    defer est.deinit();
+    // 128 distinct keys, each incr'd 5 times
+    for (0..128) |k| {
+        for (0..5) |_| {
+            _ = est.incr(k, 1);
+        }
+    }
+    // query a key not incr'd — Count-Min Sketch may have false positives
+    // but with 8 hashes x 1024 slots the FP for a clean key should be tolerable
+    const clean = est.get(999);
+    // ponytail: soft bound — real CM-sketch FP < 5%
+    try std.testing.expect(clean <= 15);
+    // known key should be >=5
+    try std.testing.expect(est.get(0) >= 5);
+}
+
+test "integration: Rate rate returns meaningful value across interval boundary" {
+    const alc = std.testing.allocator;
+    var r = try Rate.init(alc, 10);
+    defer r.deinit();
+    _ = r.observe(42, 20);
+    std.time.sleep(30 * std.time.ns_per_ms);
+    _ = r.observe(42, 10);
+    const rv = r.rate(42);
+    // 20 events over 10ms = 2000 Hz approximate
+    try std.testing.expect(rv > 0);
+}
+
+test "integration: Inflight guard lifetime — Estiator integrity after guard release" {
+    const alc = std.testing.allocator;
+    var inf = try Inflight.init(alc);
+    defer inf.deinit(alc);
+    {
+        const g = inf.incr(7, 5);
+        try std.testing.expectEqual(@as(isize, 5), g.estimate);
+    } // guard.deinit() on drop
+    const g2 = inf.incr(7, 1);
+    try std.testing.expect(g2.estimate <= 2);
+    g2.guard.deinit();
 }
