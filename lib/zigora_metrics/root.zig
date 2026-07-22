@@ -5,6 +5,7 @@
 //! Prometheus text format. Admin page is a basic HTML status page.
 
 const std = @import("std");
+const log = std.log.scoped(.metrics);
 const Io = std.Io;
 const net = std.Io.net;
 const http = @import("zigora-http");
@@ -23,6 +24,7 @@ pub const Metrics = struct {
     bytes_upstream: std.atomic.Value(usize) = .{ .raw = 0 },
     bytes_downstream: std.atomic.Value(usize) = .{ .raw = 0 },
     upstream_errors: std.atomic.Value(usize) = .{ .raw = 0 },
+    upstream_active: std.atomic.Value(usize) = .{ .raw = 0 },
 
     pub fn init(allocator: std.mem.Allocator) Metrics {
         return .{ .allocator = allocator };
@@ -64,6 +66,14 @@ pub const Metrics = struct {
         _ = self.upstream_errors.fetchAdd(1, .monotonic);
     }
 
+    pub fn incUpstreamActive(self: *Metrics) void {
+        _ = self.upstream_active.fetchAdd(1, .monotonic);
+    }
+
+    pub fn decUpstreamActive(self: *Metrics) void {
+        _ = self.upstream_active.fetchSub(1, .monotonic);
+    }
+
     /// Render Prometheus text format into `writer`.
     pub fn renderPrometheus(self: *Metrics, writer: anytype) !void {
         try writer.print("# HELP zigora_connections_accepted Total connections accepted\n", .{});
@@ -93,6 +103,10 @@ pub const Metrics = struct {
         try writer.print("# HELP zigora_upstream_errors Total upstream connection errors\n", .{});
         try writer.print("# TYPE zigora_upstream_errors counter\n", .{});
         try writer.print("zigora_upstream_errors {}\n", .{self.upstream_errors.load(.monotonic)});
+
+        try writer.print("# HELP zigora_upstream_active Active upstream connections\n", .{});
+        try writer.print("# TYPE zigora_upstream_active gauge\n", .{});
+        try writer.print("zigora_upstream_active {}\n", .{self.upstream_active.load(.monotonic)});
     }
 
     /// Simple HTML admin page.
@@ -112,6 +126,7 @@ pub const Metrics = struct {
             \\<tr><td>Upstream Bytes</td><td>{}</td></tr>
             \\<tr><td>Downstream Bytes</td><td>{}</td></tr>
             \\<tr><td>Upstream Errors</td><td>{}</td></tr>
+            \\<tr><td>Active Upstream</td><td>{}</td></tr>
             \\</table>
             \\<p><a href="/metrics">Prometheus /metrics</a></p>
             \\</body></html>
@@ -124,6 +139,7 @@ pub const Metrics = struct {
                 self.bytes_upstream.load(.monotonic),
                 self.bytes_downstream.load(.monotonic),
                 self.upstream_errors.load(.monotonic),
+                self.upstream_active.load(.monotonic),
             },
         );
     }

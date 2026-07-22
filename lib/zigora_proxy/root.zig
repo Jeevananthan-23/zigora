@@ -8,6 +8,7 @@
 //! ~14 callbacks defaulting to pass-through, retry loop.
 
 const std = @import("std");
+const log = std.log.scoped(.proxy);
 const Io = std.Io;
 const net = std.Io.net;
 const core = @import("zigora-core");
@@ -102,7 +103,12 @@ pub fn HttpProxy(comptime T: type) type {
     return struct {
         inner: *T,
         backend: HttpPeer,
-        vtable: V, // v0.2 optional callbacks
+        vtable: V,
+        onUpstreamConnect: ?*const fn (*T) void = null,
+        onUpstreamDisconnect: ?*const fn (*T) void = null,
+        onUpstreamError: ?*const fn (*T) void = null,
+        upstreamBytes: ?*std.atomic.Value(usize) = null,
+        downstreamBytes: ?*std.atomic.Value(usize) = null,
 
         const Self = @This();
 
@@ -141,7 +147,7 @@ pub fn HttpProxy(comptime T: type) type {
 
             // Parse request
             const request = http.Request.parse(read_buf[0..raw.len]) catch {
-                std.log.info("proxy: (unparseable request)", .{});
+                log.info("proxy: (unparseable request)", .{});
                 return error.ProcessFailed;
             };
 
@@ -160,11 +166,9 @@ pub fn HttpProxy(comptime T: type) type {
             // v0.2 filter chain (pass-through defaults)
             if (self.vtable.proxy_upstream_filter) |f| {
                 if (!f(self.inner, &session, &ctx)) {
-                    std.log.info("proxy: upstream filter blocked request", .{});
+                    log.info("proxy: upstream filter blocked request", .{});
                     return null;
                 }
-            } else {
-                // default: proceed
             }
 
             // upstream request filter
@@ -175,12 +179,16 @@ pub fn HttpProxy(comptime T: type) type {
             }
 
             // Forward to upstream (dispatch)
-            dispatchToUpstream(io, peer.host, peer.port, raw, &writer.interface) catch |err| {
+            if (self.onUpstreamConnect) |cb| cb(self.inner);
+            dispatchToUpstream(io, peer.host, peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes) catch |err| {
+                if (self.onUpstreamDisconnect) |cb| cb(self.inner);
+                if (self.onUpstreamError) |cb| cb(self.inner);
                 if (self.vtable.fail_to_connect) |f| {
                     f(self.inner, &session, &ctx, peer, err) catch {};
                 }
                 return error.ProcessFailed;
             };
+            if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
             // upstream response filter
             if (self.vtable.upstream_response_filter) |f| {
@@ -196,7 +204,7 @@ pub fn HttpProxy(comptime T: type) type {
             if (self.vtable.logging) |f| {
                 f(self.inner, &session, &ctx, null);
             } else {
-                std.log.info("proxy: {s} {s}", .{ @tagName(request.method), request.path });
+                log.info("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
             return null;
@@ -225,6 +233,8 @@ fn dispatchToUpstream(
     port: u16,
     client_buf: []const u8,
     client_writer: *Io.Writer,
+    upstream_bytes: ?*std.atomic.Value(usize),
+    downstream_bytes: ?*std.atomic.Value(usize),
 ) !void {
     const ip4 = net.Ip4Address.parse(host, port) catch return error.InvalidUpstream;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -232,6 +242,7 @@ fn dispatchToUpstream(
     defer ups.close(io);
 
     if (client_buf.len > 0) {
+        if (upstream_bytes) |ctr| _ = ctr.fetchAdd(client_buf.len, .monotonic);
         var ups_write_buf: [4096]u8 = undefined;
         var ups_writer = net.Stream.writer(ups, io, &ups_write_buf);
         ups_writer.interface.writeAll(client_buf) catch return error.WriteUpstream;
@@ -246,6 +257,7 @@ fn dispatchToUpstream(
             else => return error.ReadUpstream,
         };
         if (slice.len == 0) return;
+        if (downstream_bytes) |ctr| _ = ctr.fetchAdd(slice.len, .monotonic);
         client_writer.writeAll(slice) catch return error.WriteClient;
         client_writer.flush() catch return error.WriteClient;
         _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return error.ReadUpstream;
