@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.2.2 — 2026-07-22
+
+Connection lifecycle callbacks on `Service` and `HttpProxy`, per-request
+counter-based hash key for consistent load balancing, upstream active
+connection tracking in metrics, and scoped loggers on all modules.
+
+### Additions
+
+- **core** (`lib/zigora_core/service.zig`): `onAccept` / `onFinish` callbacks
+  on `Service`. `handleConn` now captures `*Self` (not `*App`) so it can fire
+  `onFinish` on connection close.
+- **proxy** (`lib/zigora_proxy/root.zig`): `onUpstreamConnect`,
+  `onUpstreamDisconnect`, `onUpstreamError` callbacks on `HttpProxy`.
+  `upstreamBytes` / `downstreamBytes` optional atomic pointer fields —
+  incremented inside `dispatchToUpstream`.
+- **metrics** (`lib/zigora_metrics/root.zig`): `upstream_active` counter
+  with `incUpstreamActive` / `decUpstreamActive` methods. Rendered in both
+  Prometheus and admin page.
+- **all modules**: scoped loggers (`const log = std.log.scoped(.X)`) in every
+  package root file, server.zig, listeners.zig, main entrypoints, and examples.
+
+### Fixes
+
+- **main.zig + load_balancer example**: hash key changed from static
+  `"key"` (always routes to same backend) to per-request atomic counter
+  for round-robin distribution.
+- **BackendCfg**: changed from single `{host,port}` to `ArrayList([]const u8)`,
+  supporting multiple `--backend` CLI flags. Defaults to `[127.0.0.1:9000,
+  127.0.0.1:9001]`.
+
+### Docs
+
+- `BENCHMARK.md` — benchmark results (~310 req/s, 82ms median).
+- `V0.3_ROADMAP.md` — priority-ordered plan for v0.3.
+
 ## v0.2.1 — 2026-07-21
 
 Bugfix release: v0.2.0 packages compiled individually but the binary and
