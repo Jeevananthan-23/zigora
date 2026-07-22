@@ -16,6 +16,7 @@
 //! phase" integration, we only need the decision surface.
 
 const std = @import("std");
+const log = std.log.scoped(.cache);
 const http = @import("zigora-http");
 const zgcache = @This();
 

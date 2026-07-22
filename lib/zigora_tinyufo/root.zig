@@ -13,6 +13,7 @@
 //! `put` returns a list of evicted KV pairs. Keys are u64 (caller-hashed).
 
 const std = @import("std");
+const log = std.log.scoped(.tinyufo);
 const zgtinyufo = @This();
 
 // ponytail: spinlock wrapping std.atomic.Mutex for old std.Thread.Mutex API.

@@ -6,6 +6,7 @@
 //! See ARCHITECTURE.md §3.
 
 const std = @import("std");
+const log = std.log.scoped(.http);
 const zghttp = @This();
 
 pub const HttpError = error{

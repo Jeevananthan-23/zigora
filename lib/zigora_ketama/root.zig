@@ -6,6 +6,7 @@
 //! a binary search; wrap to ring head on miss.
 
 const std = @import("std");
+const log = std.log.scoped(.ketama);
 const zgketama = @This();
 
 /// nginx default: 160 points per weight unit

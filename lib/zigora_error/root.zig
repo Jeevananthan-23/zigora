@@ -3,6 +3,7 @@
 //! so callers convert Zig errors to `Error` via `Error.fromZig(err)`.
 
 const std = @import("std");
+const log = std.log.scoped(.zg_error);
 
 pub const zgerror = @This();
 

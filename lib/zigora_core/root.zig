@@ -5,6 +5,7 @@
 //! See ARCHITECTURE.md §3 for the Pingora map.
 
 const std = @import("std");
+const log = std.log.scoped(.core);
 const Io = std.Io;
 const net = std.Io.net;
 // v0.2 surfaces structured errors via `zigora-error`; unused in v0.1.

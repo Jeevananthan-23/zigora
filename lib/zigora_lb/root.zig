@@ -9,6 +9,7 @@
 //! `build(backends, allocator) → Self!` and `next(key) → usize` works.
 
 const std = @import("std");
+const log = std.log.scoped(.lb);
 const ketama = @import("zigora-ketama");
 const zglb = @This();
 

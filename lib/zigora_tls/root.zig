@@ -3,6 +3,7 @@
 //! is selected. See V0.2_ROADMAP.md phase 3.11.
 
 const std = @import("std");
+const log = std.log.scoped(.tls);
 const Io = std.Io;
 const net = std.Io.net;
 const Stream = net.Stream;

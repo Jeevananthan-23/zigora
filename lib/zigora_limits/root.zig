@@ -10,6 +10,7 @@
 //! All zero cross-module deps, no allocations after `init`.
 
 const std = @import("std");
+const log = std.log.scoped(.limits);
 const zglimits = @This();
 
 // ponytail: clock via global Io instead of removed std.time.milliTimestamp.

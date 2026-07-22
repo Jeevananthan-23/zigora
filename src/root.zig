@@ -2,6 +2,7 @@
 //! `@import("zigora")` and get the v0.1 surface: core + proxy + http + error.
 
 const std = @import("std");
+const log = std.log.scoped(.zigora_src);
 const core = @import("zigora-core");
 const http = @import("zigora-http");
 const proxy = @import("zigora-proxy");

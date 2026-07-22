@@ -3,6 +3,7 @@
 //! Serves Prometheus /metrics and /admin on the same port.
 
 const std = @import("std");
+const log = std.log.scoped(.simple_proxy);
 const Io = std.Io;
 const core = @import("zigora-core");
 const http = @import("zigora-http");

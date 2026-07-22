@@ -8,6 +8,7 @@
 //! Memory is `std.heap.PageAllocator`-friendly (no box-per-node, no unsafe).
 
 const std = @import("std");
+const log = std.log.scoped(.lru);
 const zglru = @This();
 
 // ponytail: spinlock wrapping std.atomic.Mutex for old std.Thread.Mutex API.

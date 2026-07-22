@@ -14,6 +14,7 @@
 //! Upgrade paths noted inline.
 
 const std = @import("std");
+const log = std.log.scoped(.pool);
 
 // ponytail: simple spinlock wrapping std.atomic.Mutex for the old
 // std.Thread.Mutex API. Upgrade to std.Io.Mutex + io context when async.

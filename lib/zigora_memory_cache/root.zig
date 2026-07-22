@@ -6,6 +6,7 @@
 //! pingora's design). Weight is always 1 per entry.
 
 const std = @import("std");
+const log = std.log.scoped(.memory_cache);
 const tinyufo = @import("zigora-tinyufo");
 const zgmemcache = @This();
 

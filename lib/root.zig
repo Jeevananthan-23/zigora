@@ -21,4 +21,6 @@ pub const zgtls = @import("zigora_tls/root.zig");
 pub const zgmetrics = @import("zigora_metrics/root.zig");
 pub const zgutils = @import("zigora_utils/root.zig");
 
+const std = @import("std");
+const log = std.log.scoped(.zigora_lib);
 pub const zigoralib = @This();

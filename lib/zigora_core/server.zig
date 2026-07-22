@@ -5,6 +5,7 @@
 //! v0.2: signal handlers, FD transfer, keepalive — see V0.2_ROADMAP.md phase 4.
 
 const std = @import("std");
+const log = std.log.scoped(.core);
 const Io = std.Io;
 const service_mod = @import("service.zig");
 
@@ -80,7 +81,7 @@ pub const Server = struct {
     /// then block on each future. Accept loops poll `shutdownWatch()`.
     pub fn runForever(self: *Server, io: Io) !void {
         if (self.services.items.len == 0) return error.NoServices;
-        std.log.info("core: server starting {d} service(s)", .{self.services.items.len});
+        log.info("core: server starting {d} service(s)", .{self.services.items.len});
 
         _ = self.phase_.swap(ExecutionPhase.Running, .acq_rel);
 
@@ -92,7 +93,7 @@ pub const Server = struct {
         const Adapter = struct {
             fn start(slot: *ServiceSlot, io_arg: Io, alc: std.mem.Allocator) void {
                 slot.start(slot.userdata, io_arg, alc) catch |err| {
-                    std.log.err("core: service '{s}' crashed: {s}", .{ slot.name, @errorName(err) });
+                    log.err("core: service '{s}' crashed: {s}", .{ slot.name, @errorName(err) });
                     return;
                 };
             }
@@ -107,11 +108,11 @@ pub const Server = struct {
 
         for (futures, 0..) |*f, i| {
             _ = f.await(io);
-            std.log.info("core: service '{s}' stopped", .{self.services.items[i].name});
+            log.info("core: service '{s}' stopped", .{self.services.items[i].name});
         }
 
         _ = self.phase_.swap(ExecutionPhase.Terminated, .acq_rel);
-        std.log.info("core: all services stopped", .{});
+        log.info("core: all services stopped", .{});
     }
 
     pub fn phase(self: *Server) ExecutionPhase {
