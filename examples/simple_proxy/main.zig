@@ -6,9 +6,14 @@ const std = @import("std");
 const log = std.log.scoped(.simple_proxy);
 const Io = std.Io;
 const core = @import("zigora-core");
-const http = @import("zigora-http");
 const proxy = @import("zigora-proxy");
 const metrics = @import("zigora-metrics");
+
+var global_metrics: ?*metrics.Metrics = null;
+
+fn renderMetrics(w: *Io.Writer) void {
+    if (global_metrics) |m| m.renderPrometheus(w) catch {};
+}
 
 const AppState = struct {
     metrics: metrics.Metrics,
@@ -26,38 +31,27 @@ const MyProxy = struct {
     pub fn upstream_peer(_: *MyProxy, _: *proxy.Ctx) proxy.HttpPeer {
         return .{ .host = "127.0.0.1", .port = 9000 };
     }
-
-    pub fn proxy_upstream_filter(self: *MyProxy, session: *proxy.Session(proxy.Ctx), _: *proxy.Ctx) bool {
-        const path = session.request.path;
-        if (std.mem.eql(u8, path, "/metrics")) {
-            var wbuf: [4096]u8 = undefined;
-            var w = session.stream.writer(session.io, &wbuf);
-            const wptr = &w.interface;
-            Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nConnection: close\r\n\r\n") catch {};
-            self.state.metrics.renderPrometheus(wptr) catch {};
-            Io.Writer.flush(wptr) catch {};
-            session.stream.close(session.io);
-            return false;
-        }
-        return true;
-    }
 };
 
 pub fn main(init: std.process.Init) !void {
     const process_io = init.io;
     const arena = init.arena.allocator();
     const m = metrics.Metrics.init(arena);
+    global_metrics = &m;
+
     var state = AppState{ .metrics = m };
     var my_proxy = MyProxy{ .state = &state };
     const Svc = core.Service(proxy.HttpProxy(MyProxy));
-    var svc = Svc.init("simple_proxy", proxy.HttpProxy(MyProxy).init(&my_proxy, .{
+    var proxy_app = proxy.HttpProxy(MyProxy).init(&my_proxy, .{
         .host = "127.0.0.1",
         .port = 9000,
-    }));
+    });
+    proxy_app.renderMetrics = &renderMetrics;
+    var svc = Svc.init("simple_proxy", proxy_app);
     try svc.addTcp(arena, "127.0.0.1:8080");
     const SlotWrap = struct {
-        fn start(ptr: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
-            const real: *Svc = @ptrCast(@alignCast(ptr));
+        fn start(ud: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
+            const real: *Svc = @ptrCast(@alignCast(ud));
             try real.startService(io, alc);
         }
     };

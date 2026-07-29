@@ -10,6 +10,12 @@ const proxy = @import("zigora-proxy");
 const lb = @import("zigora-lb");
 const metrics = @import("zigora-metrics");
 
+var global_metrics: ?*metrics.Metrics = null;
+
+fn renderMetrics(w: *Io.Writer) void {
+    if (global_metrics) |m| m.renderPrometheus(w) catch {};
+}
+
 const AppState = struct {
     balancer: lb.LoadBalancer(lb.Consistent),
     metrics: metrics.Metrics,
@@ -34,23 +40,7 @@ const MyProxy = struct {
             ctx.backend_host = "127.0.0.1";
             ctx.backend_port = std.Io.net.IpAddress.getPort(b.addr);
         }
-        std.log.info("routing to {s}:{d}", .{ ctx.backend_host, ctx.backend_port });
         return .{ .host = ctx.backend_host, .port = ctx.backend_port };
-    }
-
-    pub fn proxy_upstream_filter(self: *MyProxy, session: *proxy.Session(proxy.Ctx), _: *proxy.Ctx) bool {
-        const path = session.request.path;
-        if (std.mem.eql(u8, path, "/metrics")) {
-            var wbuf: [4096]u8 = undefined;
-            var w = session.stream.writer(session.io, &wbuf);
-            const wptr = &w.interface;
-            Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nConnection: close\r\n\r\n") catch {};
-            self.state.metrics.renderPrometheus(wptr) catch {};
-            Io.Writer.flush(wptr) catch {};
-            session.stream.close(session.io);
-            return false;
-        }
-        return true;
     }
 };
 
@@ -64,6 +54,8 @@ pub fn main(init: std.process.Init) !void {
     };
     const balancer = try lb.LoadBalancer(lb.Consistent).init(arena, backends[0..]);
     const m = metrics.Metrics.init(arena);
+    global_metrics = &m;
+
     var state = AppState{ .balancer = balancer, .metrics = m };
     var my_proxy = MyProxy{ .state = &state };
     const Svc = core.Service(proxy.HttpProxy(MyProxy));
@@ -71,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
         .host = "127.0.0.1",
         .port = 9000,
     });
+    proxy_app.renderMetrics = &renderMetrics;
     proxy_app.onUpstreamConnect = struct {
         fn cb(p: *MyProxy) void { p.state.metrics.incUpstreamActive(); }
     }.cb;
@@ -82,22 +75,23 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
     proxy_app.upstreamBytes = &state.metrics.bytes_upstream;
     proxy_app.downstreamBytes = &state.metrics.bytes_downstream;
+
     var svc = Svc.init("lb_example", proxy_app);
     svc.onAccept = struct {
-        fn cb(app: *proxy.HttpProxy(MyProxy)) void {
-            app.inner.state.metrics.incAccepted();
-            app.inner.state.metrics.incActive();
+        fn cb(o: *proxy.HttpProxy(MyProxy)) void {
+            o.inner.state.metrics.incAccepted();
+            o.inner.state.metrics.incActive();
         }
     }.cb;
     svc.onFinish = struct {
-        fn cb(app: *proxy.HttpProxy(MyProxy)) void {
-            app.inner.state.metrics.decActive();
+        fn cb(o: *proxy.HttpProxy(MyProxy)) void {
+            o.inner.state.metrics.decActive();
         }
     }.cb;
     try svc.addTcp(arena, "127.0.0.1:8081");
     const SlotWrap = struct {
-        fn start(ptr: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
-            const real: *Svc = @ptrCast(@alignCast(ptr));
+        fn start(ud: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
+            const real: *Svc = @ptrCast(@alignCast(ud));
             try real.startService(io, alc);
         }
     };
