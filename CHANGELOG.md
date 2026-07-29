@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2.3 — 2026-07-22
+
+Proxy production-readiness: upstream response parsing (status line + headers
++ body), retry loop with configurable max_retries in HttpProxy,
+/ /admin served at the proxy layer (no user boilerplate), per-service approach
+via ShutdownWatch, ConnectionPool keepalive hook, and removed unused
+package imports from AppState.
+
+### Additions
+
+- **proxy** (`lib/zigora_proxy/root.zig`): `proxyToH1` replaces the old byte-forwarder
+  with parsed upstream response handling — parses `ResponseHeader` from upstream,
+  stores it on `Session.response`, logs `{method} {path} → {status_code}`.
+- **Retry** loop: `max_retries` field on `HttpProxy`. On connection failure,
+  re-selects `upstream_peer` and retries up to the limit; fires `fail_to_connect`
+  once on the final error.
+- **Framework** /metrics and /admin: `renderMetrics` and `renderAdmin` optional
+  callbacks on `HttpProxy` — the proxy intercepts `GET /metrics` and `GET /admin`
+  before upstream dispatch, no user callback needed.
+- **core** (`lib/zigora_core/service.zig`): `Service.shutdown_watch` field —
+  set via `setShutdown(sh).` Accept loop polls `ShutdownWatch.check()` per
+  aggregation. No poll → loop runs forever (backward-compatible default).
+- **core** (`lib/zigora_core/root.zig`): `ShutdownWatch` re-export for library
+  consumers.
+
+### Changes
+
+- **src/main.zig**: 13 packages → 4; AppState is now `{balancer, metrics,
+  counter}`. /metrics and /admin handled by `renderMetrics/renderAdmin`
+  callbacks via package-level `global_metrics` pointer. `MyProxy.proxy_upstream_filter`
+  removed — no longer needed.
+- **examples/load_balancer/main.zig**: same framework /metrics render, no boilerplate filter.
+- **examples/simple_proxy/main.zig**: only `/metrics` render; no admin page.
+
 ## v0.2.2 — 2026-07-22
 
 Connection lifecycle callbacks on `Service` and `HttpProxy`, per-request
