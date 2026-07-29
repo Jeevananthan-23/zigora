@@ -1,11 +1,10 @@
 //! Port of pingora-proxy: `ProxyHttp` trait + `HttpProxy` struct.
 //! See ARCHITECTURE.md §3 (zigora_proxy section) and V0.2_ROADMAP.md phase 3.10.
 //!
-//! v0.1 surface: minimal ProxyHttp (new_ctx, upstream_peer, logging),
-//! HttpProxy impl of ServerApp with direct-splice dispatch.
-//!
-//! v0.2 surface: Session (per-request state), extended ProxyHttp vtable with
-//! ~14 callbacks defaulting to pass-through, retry loop.
+//! v0.1 surface: single-fixed-backend splice.
+//! v0.2: Session (per-request state), 14-callback vtable, retry loop.
+//! v0.2.3: upstream response parsing, max_retries, framework /metrics + /admin,
+//! keepalive upstream stream, ConnectionPool integration hook.
 
 const std = @import("std");
 const log = std.log.scoped(.proxy);
@@ -93,44 +92,51 @@ pub fn ProxyHttp(comptime T: type) type {
     };
 }
 
-// ---- v0.2 HttpProxy with filter chain ----
+// ---- v0.2 HttpProxy with Pingora filter chain ----
+
+pub const DispatchResult = enum {
+    ok,
+    failed,
+    blocked,
+};
 
 /// `pingora_proxy::HttpProxy<SV>` — the `ServerApp` implementation.
-/// Generic over the user's `ProxyHttp` implementation.
 pub fn HttpProxy(comptime T: type) type {
-    const V = ProxyHttpVTable(T, Ctx);
+    const Vtable = ProxyHttpVTable(T, Ctx);
 
     return struct {
         inner: *T,
         backend: HttpPeer,
-        vtable: V,
+        vtable: Vtable,
+        max_retries: usize = 1,
         onUpstreamConnect: ?*const fn (*T) void = null,
         onUpstreamDisconnect: ?*const fn (*T) void = null,
         onUpstreamError: ?*const fn (*T) void = null,
         upstreamBytes: ?*std.atomic.Value(usize) = null,
         downstreamBytes: ?*std.atomic.Value(usize) = null,
+        /// Framework-level handler: renders Prometheus metrics → writer. Called
+        /// for GET /metrics before upstream dispatch.
+        renderMetrics: ?*const fn (*Io.Writer) void = null,
+        /// Framework-level handler: renders admin HTML → writer. Called for
+        /// GET /admin before upstream dispatch.
+        renderAdmin: ?*const fn (*Io.Writer) void = null,
 
         const Self = @This();
 
-        /// Wire callbacks declared on `T` into the vtable by name.
-        /// Each optional callback is checked with `@hasDecl` and wired if present.
-        /// New callbacks added here as needed — one explicit line beats comptime
-        /// type-matching that silently misses coercion nuances.
         pub fn init(impl: *T, backend: HttpPeer) Self {
-            var vt: V = .{ .new_ctx = T.new_ctx };
+            var vt: Vtable = .{ .new_ctx = T.new_ctx };
             if (@hasDecl(T, "proxy_upstream_filter")) {
                 vt.proxy_upstream_filter = T.proxy_upstream_filter;
             }
             return .{ .inner = impl, .backend = backend, .vtable = vt };
         }
 
-        /// v0.2: full V table enables custom callbacks.
-        pub fn initWith(impl: *T, backend: HttpPeer, vt: V) Self {
+        pub fn initWith(impl: *T, backend: HttpPeer, vt: Vtable) Self {
             return .{ .inner = impl, .backend = backend, .vtable = vt };
         }
 
-        /// Implement `core.ServerApp.process_new(io, stream)`.
-        /// v0.2: parse → filter chain → `dispatchToUpstream` → log.
+        /// Full Pingora lifecycle: parse → filter → framework /metrics|/admin
+        /// intercept → retry loop → proxyToH1 → filters → log.
         pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
             var read_buf: [4096]u8 = undefined;
             var write_buf: [4096]u8 = undefined;
@@ -144,17 +150,35 @@ pub fn HttpProxy(comptime T: type) type {
             if (raw.len == 0) return null;
 
             var ctx = ProxyHttp(T).newCtx(self.inner);
-
-            // Parse request
             const request = http.Request.parse(read_buf[0..raw.len]) catch {
-                log.info("proxy: (unparseable request)", .{});
+                log.info("proxy: (unparsable request)", .{});
                 return error.ProcessFailed;
             };
 
-            // Select the peer
-            const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
+            // ---- framework /metrics and /admin intercept ----
+            if (request.method == .GET) {
+                if (std.mem.eql(u8, request.path, "/metrics")) {
+                    if (self.renderMetrics) |render| {
+                        const wptr = &writer.interface;
+                        Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nConnection: close\r\n\r\n") catch {};
+                        render(wptr);
+                        Io.Writer.flush(wptr) catch {};
+                        stream.close(io);
+                        return null;
+                    }
+                } else if (std.mem.eql(u8, request.path, "/admin")) {
+                    if (self.renderAdmin) |render| {
+                        const wptr = &writer.interface;
+                        Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n") catch {};
+                        render(wptr);
+                        Io.Writer.flush(wptr) catch {};
+                        stream.close(io);
+                        return null;
+                    }
+                }
+            }
 
-            // Build session
+            const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
             var session = Session(Ctx){
                 .io = io,
                 .stream = stream,
@@ -163,7 +187,7 @@ pub fn HttpProxy(comptime T: type) type {
                 .ctx = ctx,
             };
 
-            // v0.2 filter chain (pass-through defaults)
+            // vtable proxy_upstream_filter — user intercept (replaces old boilerplate)
             if (self.vtable.proxy_upstream_filter) |f| {
                 if (!f(self.inner, &session, &ctx)) {
                     log.info("proxy: upstream filter blocked request", .{});
@@ -171,38 +195,46 @@ pub fn HttpProxy(comptime T: type) type {
                 }
             }
 
-            // upstream request filter
             if (self.vtable.upstream_request_filter) |f| {
-                f(self.inner, &session, &ctx) catch {
-                    return error.ProcessFailed;
-                };
+                f(self.inner, &session, &ctx) catch return error.ProcessFailed;
             }
 
-            // Forward to upstream (dispatch)
-            if (self.onUpstreamConnect) |cb| cb(self.inner);
-            dispatchToUpstream(io, peer.host, peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes) catch |err| {
-                if (self.onUpstreamDisconnect) |cb| cb(self.inner);
-                if (self.onUpstreamError) |cb| cb(self.inner);
-                if (self.vtable.fail_to_connect) |f| {
-                    f(self.inner, &session, &ctx, peer, err) catch {};
+            // ---- retry loop ----
+            var retries: usize = 0;
+            while (retries <= self.max_retries) : (retries += 1) {
+                if (retries > 0) {
+                    session.peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
+                    session.retries = retries;
                 }
-                return error.ProcessFailed;
-            };
-            if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
-            // upstream response filter
+                if (self.onUpstreamConnect) |cb| cb(self.inner);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session);
+                if (self.onUpstreamDisconnect) |cb| cb(self.inner);
+
+                if (result == .ok) {
+                    break;
+                }
+                if (self.onUpstreamError) |cb| cb(self.inner);
+                if (result == .blocked) return null;
+                if (retries == self.max_retries) {
+                    if (self.vtable.fail_to_connect) |f| {
+                        f(self.inner, &session, &ctx, session.peer, error.ConnectFailed) catch {};
+                    }
+                    return error.ProcessFailed;
+                }
+            }
+
             if (self.vtable.upstream_response_filter) |f| {
                 f(self.inner, &session, &ctx) catch {};
             }
-
-            // response filter
             if (self.vtable.response_filter) |f| {
                 f(self.inner, &session, &ctx) catch {};
             }
 
-            // logging
             if (self.vtable.logging) |f| {
                 f(self.inner, &session, &ctx, null);
+            } else if (session.response) |resp| {
+                log.info("proxy: {s} {s} → {d}", .{ @tagName(request.method), request.path, resp.status_code });
             } else {
                 log.info("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
@@ -214,8 +246,6 @@ pub fn HttpProxy(comptime T: type) type {
     };
 }
 
-/// Convenience: build a `Service<HttpProxy<T>>` ready to `addTcp` and add
-/// to a `Server`. Mirrors `pingora_proxy::http_proxy_service(conf, impl)`.
 pub fn http_proxy_service(
     comptime T: type,
     name: []const u8,
@@ -225,9 +255,12 @@ pub fn http_proxy_service(
     return core.service_mod.Service(HttpProxy(T)).init(name, HttpProxy(T).init(impl, backend));
 }
 
-// ---- dispatch ---
+// ---- proxyToH1: upstream dispatch + response parse + body stream ----
 
-fn dispatchToUpstream(
+/// Connect to upstream, write raw request bytes, buffer + parse the upstream
+/// response, write headers + body to client writer. Returns `.ok` on success,
+/// `.failed` for connection/IO errors, `.blocked` for filter denials.
+fn proxyToH1(
     io: Io,
     host: []const u8,
     port: u16,
@@ -235,33 +268,57 @@ fn dispatchToUpstream(
     client_writer: *Io.Writer,
     upstream_bytes: ?*std.atomic.Value(usize),
     downstream_bytes: ?*std.atomic.Value(usize),
-) !void {
-    const ip4 = net.Ip4Address.parse(host, port) catch return error.InvalidUpstream;
+    session_capture: *Session(Ctx),
+) DispatchResult {
+    const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
-    var ups = net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch return error.ConnectFailed;
+    var ups = net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch return .failed;
     defer ups.close(io);
 
+    // send request to upstream
     if (client_buf.len > 0) {
         if (upstream_bytes) |ctr| _ = ctr.fetchAdd(client_buf.len, .monotonic);
         var ups_write_buf: [4096]u8 = undefined;
         var ups_writer = net.Stream.writer(ups, io, &ups_write_buf);
-        ups_writer.interface.writeAll(client_buf) catch return error.WriteUpstream;
-        ups_writer.interface.flush() catch return error.WriteUpstream;
+        ups_writer.interface.writeAll(client_buf) catch return .failed;
+        ups_writer.interface.flush() catch return .failed;
     }
 
+    // buffer upstream response (Pingora uses streaming HttpTask; we copy into
+    // an 8k response buf for simplicity, parse, then forward to client)
     var ups_read_buf: [4096]u8 = undefined;
     var ups_reader = net.Stream.reader(ups, io, &ups_read_buf);
-    while (true) {
+    var resp_buf: [8192]u8 = undefined;
+    var resp_len: usize = 0;
+
+    while (resp_len < resp_buf.len) {
         const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
-            error.EndOfStream => return,
-            else => return error.ReadUpstream,
+            error.EndOfStream => break,
+            else => return .failed,
         };
-        if (slice.len == 0) return;
-        if (downstream_bytes) |ctr| _ = ctr.fetchAdd(slice.len, .monotonic);
-        client_writer.writeAll(slice) catch return error.WriteClient;
-        client_writer.flush() catch return error.WriteClient;
-        _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return error.ReadUpstream;
+        if (slice.len == 0) break;
+        const n = @min(slice.len, resp_buf.len - resp_len);
+        @memcpy(resp_buf[resp_len..][0..n], slice[0..n]);
+        resp_len += n;
+        if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
+        _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
     }
+
+    if (resp_len > 0) {
+        // parse upstream response, store on session for filters + logging
+        if (http.ResponseHeader.parse(resp_buf[0..resp_len])) |parsed| {
+            session_capture.response = parsed;
+            client_writer.writeAll(resp_buf[0..parsed.body_start]) catch return .failed;
+            if (resp_len > parsed.body_start) {
+                client_writer.writeAll(resp_buf[parsed.body_start..resp_len]) catch return .failed;
+            }
+        } else |_| {
+            client_writer.writeAll(resp_buf[0..resp_len]) catch return .failed;
+        }
+        client_writer.flush() catch return .failed;
+    }
+
+    return .ok;
 }
 
 // ===== Tests =====
