@@ -10,6 +10,8 @@ const log = std.log.scoped(.core);
 const Io = std.Io;
 const net = std.Io.net;
 const listeners_mod = @import("listeners.zig");
+const server_mod = @import("server.zig");
+const ShutdownWatch = server_mod.ShutdownWatch;
 const Stream = net.Stream;
 
 pub const zgcore_service = @This();
@@ -77,6 +79,7 @@ pub fn Service(comptime App: type) type {
         listeners: listeners_mod.Listeners,
         threads: ?usize = null,
         inflight: Io.Group = .init,
+        shutdown_watch: ?ShutdownWatch = null,
         onAccept: ?*const fn (*App) void = null,
         onFinish: ?*const fn (*App) void = null,
 
@@ -84,6 +87,10 @@ pub fn Service(comptime App: type) type {
 
         pub fn init(name: []const u8, app: App) Self {
             return .{ .name = name, .app = app, .listeners = listeners_mod.Listeners.init() };
+        }
+
+        pub fn setShutdown(self: *Self, sh: ShutdownWatch) void {
+            self.shutdown_watch = sh;
         }
 
         pub fn addTcp(self: *Self, allocator: std.mem.Allocator, addr: []const u8) !void {
@@ -98,8 +105,24 @@ pub fn Service(comptime App: type) type {
             var listener = built[0];
             log.info("core: service '{s}' listening", .{self.name});
 
-            while (true) {
+            const sh = self.shutdown_watch orelse {
+                // no shutdown watch set: run forever
+                while (true) {
+                    var stream = listener.accept(io) catch |err| {
+                        log.warn("core: accept failed: {s}", .{@errorName(err)});
+                        continue;
+                    };
+                    if (self.onAccept) |cb| cb(&self.app);
+                    self.inflight.concurrent(io, handleConn, .{ self, io, stream }) catch |err| {
+                        log.warn("core: dispatch failed: {s}", .{@errorName(err)});
+                        stream.close(io);
+                    };
+                    }
+            };
+            // with shutdown watch: poll on every accept iteration
+            while (!sh.check()) {
                 var stream = listener.accept(io) catch |err| {
+                    if (sh.check()) return;
                     log.warn("core: accept failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -109,6 +132,7 @@ pub fn Service(comptime App: type) type {
                     stream.close(io);
                 };
             }
+            log.info("core: service '{s}' shutting down", .{self.name});
         }
 
         fn handleConn(self: *Self, io: Io, stream: Stream) void {

@@ -24,3 +24,4 @@ pub const server_mod = @import("server.zig");
 pub const Server = server_mod.Server;
 pub const ServerConf = server_mod.ServerConf;
 pub const ExecutionPhase = server_mod.ExecutionPhase;
+pub const ShutdownWatch = server_mod.ShutdownWatch;
