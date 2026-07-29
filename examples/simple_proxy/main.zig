@@ -36,7 +36,7 @@ const MyProxy = struct {
 pub fn main(init: std.process.Init) !void {
     const process_io = init.io;
     const arena = init.arena.allocator();
-    const m = metrics.Metrics.init(arena);
+    var m = metrics.Metrics.init(arena);
     global_metrics = &m;
 
     var state = AppState{ .metrics = m };

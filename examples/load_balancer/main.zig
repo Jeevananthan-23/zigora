@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
         try lb.Backend.newWithWeight("127.0.0.1:9001", 5),
     };
     const balancer = try lb.LoadBalancer(lb.Consistent).init(arena, backends[0..]);
-    const m = metrics.Metrics.init(arena);
+    var m = metrics.Metrics.init(arena);
     global_metrics = &m;
 
     var state = AppState{ .balancer = balancer, .metrics = m };
