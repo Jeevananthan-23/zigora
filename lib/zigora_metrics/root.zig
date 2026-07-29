@@ -25,6 +25,10 @@ pub const Metrics = struct {
     bytes_downstream: std.atomic.Value(usize) = .{ .raw = 0 },
     upstream_errors: std.atomic.Value(usize) = .{ .raw = 0 },
     upstream_active: std.atomic.Value(usize) = .{ .raw = 0 },
+    cache_hits: std.atomic.Value(usize) = .{ .raw = 0 },
+    cache_misses: std.atomic.Value(usize) = .{ .raw = 0 },
+    cache_expired: std.atomic.Value(usize) = .{ .raw = 0 },
+    cache_puts: std.atomic.Value(usize) = .{ .raw = 0 },
 
     pub fn init(allocator: std.mem.Allocator) Metrics {
         return .{ .allocator = allocator };
@@ -74,6 +78,22 @@ pub const Metrics = struct {
         _ = self.upstream_active.fetchSub(1, .monotonic);
     }
 
+    pub fn incCacheHit(self: *Metrics) void {
+        _ = self.cache_hits.fetchAdd(1, .monotonic);
+    }
+
+    pub fn incCacheMiss(self: *Metrics) void {
+        _ = self.cache_misses.fetchAdd(1, .monotonic);
+    }
+
+    pub fn incCacheExpired(self: *Metrics) void {
+        _ = self.cache_expired.fetchAdd(1, .monotonic);
+    }
+
+    pub fn incCachePut(self: *Metrics) void {
+        _ = self.cache_puts.fetchAdd(1, .monotonic);
+    }
+
     /// Render Prometheus text format into `writer`.
     pub fn renderPrometheus(self: *Metrics, writer: anytype) !void {
         try writer.print("# HELP zigora_connections_accepted Total connections accepted\n", .{});
@@ -107,6 +127,22 @@ pub const Metrics = struct {
         try writer.print("# HELP zigora_upstream_active Active upstream connections\n", .{});
         try writer.print("# TYPE zigora_upstream_active gauge\n", .{});
         try writer.print("zigora_upstream_active {}\n", .{self.upstream_active.load(.monotonic)});
+
+        try writer.print("# HELP zigora_cache_hits Total cache hits\n", .{});
+        try writer.print("# TYPE zigora_cache_hits counter\n", .{});
+        try writer.print("zigora_cache_hits {}\n", .{self.cache_hits.load(.monotonic)});
+
+        try writer.print("# HELP zigora_cache_misses Total cache misses\n", .{});
+        try writer.print("# TYPE zigora_cache_misses counter\n", .{});
+        try writer.print("zigora_cache_misses {}\n", .{self.cache_misses.load(.monotonic)});
+
+        try writer.print("# HELP zigora_cache_expired Total expired cache entries\n", .{});
+        try writer.print("# TYPE zigora_cache_expired counter\n", .{});
+        try writer.print("zigora_cache_expired {}\n", .{self.cache_expired.load(.monotonic)});
+
+        try writer.print("# HELP zigora_cache_puts Total cache insertions\n", .{});
+        try writer.print("# TYPE zigora_cache_puts counter\n", .{});
+        try writer.print("zigora_cache_puts {}\n", .{self.cache_puts.load(.monotonic)});
     }
 
     /// Simple HTML admin page.
@@ -127,6 +163,10 @@ pub const Metrics = struct {
             \\<tr><td>Downstream Bytes</td><td>{}</td></tr>
             \\<tr><td>Upstream Errors</td><td>{}</td></tr>
             \\<tr><td>Active Upstream</td><td>{}</td></tr>
+            \\<tr><td>Cache Hits</td><td>{}</td></tr>
+            \\<tr><td>Cache Misses</td><td>{}</td></tr>
+            \\<tr><td>Cache Expired</td><td>{}</td></tr>
+            \\<tr><td>Cache Puts</td><td>{}</td></tr>
             \\</table>
             \\<p><a href="/metrics">Prometheus /metrics</a></p>
             \\</body></html>
@@ -140,6 +180,10 @@ pub const Metrics = struct {
                 self.bytes_downstream.load(.monotonic),
                 self.upstream_errors.load(.monotonic),
                 self.upstream_active.load(.monotonic),
+                self.cache_hits.load(.monotonic),
+                self.cache_misses.load(.monotonic),
+                self.cache_expired.load(.monotonic),
+                self.cache_puts.load(.monotonic),
             },
         );
     }
@@ -220,7 +264,7 @@ test "Prometheus format renders" {
     defer m.deinit();
     m.incAccepted();
 
-    var buf: [1024]u8 = undefined;
+    var buf: [2048]u8 = undefined;
     var w = Io.Writer.fixed(&buf);
     try m.renderPrometheus(&w);
     const out = w.buffer[0..w.end];

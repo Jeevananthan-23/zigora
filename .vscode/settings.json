@@ -1,0 +1,9 @@
+{
+    "zig.testArgs": [
+        "build",
+        "test",
+        "--",
+        "--test-filter",
+        "${filter}"
+    ]
+}

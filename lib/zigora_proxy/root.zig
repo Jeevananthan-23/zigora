@@ -121,6 +121,15 @@ pub fn HttpProxy(comptime T: type) type {
         /// GET /admin before upstream dispatch.
         renderAdmin: ?*const fn (*Io.Writer) void = null,
 
+        /// Cache lookup callback. Called before upstream dispatch; returns
+        /// cached response bytes (or null) for the given request path.
+        cacheLookup: ?*const fn (path: []const u8) ?[]const u8 = null,
+        /// Cache put callback. Called after a successful upstream dispatch with
+        /// the request path and the raw upstream response bytes (owned by the
+        /// caller's stack buffer; the callback must `dupe` if it needs to keep
+        /// them past the request).
+        cachePut: ?*const fn (path: []const u8, resp: []const u8) void = null,
+
         const Self = @This();
 
         pub fn init(impl: *T, backend: HttpPeer) Self {
@@ -140,6 +149,7 @@ pub fn HttpProxy(comptime T: type) type {
         pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
             var read_buf: [4096]u8 = undefined;
             var write_buf: [4096]u8 = undefined;
+            var resp_buf: [8192]u8 = undefined;
             var reader = net.Stream.reader(stream, io, &read_buf);
             var writer = net.Stream.writer(stream, io, &write_buf);
 
@@ -178,6 +188,17 @@ pub fn HttpProxy(comptime T: type) type {
                 }
             }
 
+            // ---- cache lookup ----
+            if (self.cacheLookup) |lookup| {
+                if (lookup(request.path)) |cached| {
+                    const wptr = &writer.interface;
+                    Io.Writer.writeAll(wptr, cached) catch {};
+                    Io.Writer.flush(wptr) catch {};
+                    stream.close(io);
+                    return null;
+                }
+            }
+
             const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
             var session = Session(Ctx){
                 .io = io,
@@ -201,6 +222,7 @@ pub fn HttpProxy(comptime T: type) type {
 
             // ---- retry loop ----
             var retries: usize = 0;
+            var resp_out: []const u8 = &.{};
             while (retries <= self.max_retries) : (retries += 1) {
                 if (retries > 0) {
                     session.peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
@@ -208,10 +230,13 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, &resp_buf, &resp_out);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
+                    // cache the response (callback must dupe — resp_out points
+                    // into a stack buffer that's freed on return)
+                    if (self.cachePut) |put| put(request.path, resp_out);
                     break;
                 }
                 if (self.onUpstreamError) |cb| cb(self.inner);
@@ -269,6 +294,8 @@ fn proxyToH1(
     upstream_bytes: ?*std.atomic.Value(usize),
     downstream_bytes: ?*std.atomic.Value(usize),
     session_capture: *Session(Ctx),
+    resp_buf: []u8,
+    resp_out: *[]const u8,
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -288,7 +315,6 @@ fn proxyToH1(
     // an 8k response buf for simplicity, parse, then forward to client)
     var ups_read_buf: [4096]u8 = undefined;
     var ups_reader = net.Stream.reader(ups, io, &ups_read_buf);
-    var resp_buf: [8192]u8 = undefined;
     var resp_len: usize = 0;
 
     while (resp_len < resp_buf.len) {
@@ -305,6 +331,7 @@ fn proxyToH1(
     }
 
     if (resp_len > 0) {
+        resp_out.* = resp_buf[0..resp_len];
         // parse upstream response, store on session for filters + logging
         if (http.ResponseHeader.parse(resp_buf[0..resp_len])) |parsed| {
             session_capture.response = parsed;

@@ -234,7 +234,7 @@ pub fn TinyUfo(comptime T: type) type {
         }
 
         fn smallWeightLimit(self: *Self) usize {
-            return @as(usize, @as(comptime_float, @floor(@as(f32, @floatFromInt(self.total_weight_limit)) * SMALL_PCT)) + 1);
+            return @as(usize, @intFromFloat(@floor(@as(f32, @floatFromInt(self.total_weight_limit)) * SMALL_PCT))) + 1;
         }
 
         fn evictOne(self: *Self) !?KV(T) {

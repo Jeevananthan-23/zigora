@@ -5,8 +5,10 @@ const core = @import("zigora-core");
 const proxy = @import("zigora-proxy");
 const lb = @import("zigora-lb");
 const metrics = @import("zigora-metrics");
+const memcache = @import("zigora-memory-cache");
 
 var global_metrics: ?*metrics.Metrics = null;
+var global_state: ?*AppState = null;
 
 fn renderMetrics(w: *Io.Writer) void {
     if (global_metrics) |m| m.renderPrometheus(w) catch {};
@@ -31,6 +33,8 @@ const AppState = struct {
     balancer: lb.LoadBalancer(lb.Consistent),
     metrics: metrics.Metrics,
     counter: std.atomic.Value(u64) = .{ .raw = 0 },
+    response_cache: memcache.MemoryCache([]const u8),
+    cache_allocator: std.mem.Allocator,
 };
 
 const MyProxy = struct {
@@ -72,12 +76,16 @@ pub fn main(init: std.process.Init) !void {
 
     const balancer = try lb.LoadBalancer(lb.Consistent).init(arena, backends.items);
     const m = metrics.Metrics.init(arena);
+    const resp_cache = try memcache.MemoryCache([]const u8).init(arena, 256);
 
     var state = AppState{
         .balancer = balancer,
         .metrics = m,
+        .response_cache = resp_cache,
+        .cache_allocator = arena,
     };
     global_metrics = &state.metrics;
+    global_state = &state;
 
     var server = core.Server.new(arena, .{});
     const shutdown = server.shutdownWatch();
@@ -101,6 +109,28 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
     proxy_app.upstreamBytes = &state.metrics.bytes_upstream;
     proxy_app.downstreamBytes = &state.metrics.bytes_downstream;
+    proxy_app.cacheLookup = struct {
+        fn cb(path: []const u8) ?[]const u8 {
+            const s = global_state.?;
+            const result = s.response_cache.get(path);
+            if (result.status.isHit()) {
+                s.metrics.incCacheHit();
+                return result.value;
+            }
+            s.metrics.incCacheMiss();
+            return null;
+        }
+    }.cb;
+    proxy_app.cachePut = struct {
+        fn cb(path: []const u8, resp: []const u8) void {
+            const s = global_state.?;
+            // dupe the response bytes into the process arena — the proxy's
+            // stack buffer is freed on return.
+            const owned = s.cache_allocator.dupe(u8, resp) catch return;
+            s.response_cache.put(path, owned, 60 * std.time.ns_per_s) catch return;
+            s.metrics.incCachePut();
+        }
+    }.cb;
 
     var svc = Svc.init("zigora_proxy", proxy_app);
     svc.setShutdown(shutdown);
