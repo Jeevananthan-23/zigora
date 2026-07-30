@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.4 — 2026-07-29
+
+End-to-end memory cache round-trip + cachePut callback.
+
+### Additions
+
+- **proxy** (`lib/zigora_proxy/root.zig`): optional `cachePut(path, raw_response_bytes)` callback on `HttpProxy`. Fired after successful upstream dispatch so users can populate `MemoryCache`.
+- **proxy**: `proxyToH1` gains `resp_buf: []u8` + `resp_out: *[]const u8` out-params so the upstream response buffer lives through the `cachePut` callback (no dangling pointer).
+- **main.zig**: `MyProxy.cachePut` implementation — allocator.dupe response + 60s TTL `MemCache.put()`; `metrics.incCachePut()` counter increment.
+- **metrics** (`lib/zigora_metrics/root.zig`): `cache_hits`, `cache_misses`, `cache_puts` atomic counters; rendered in Prometheus `/metrics` and admin page.
+- **tinyufo** (`lib/zigora_tinyufo/root.zig`): Zig 0.16 compat fix — `@as(comptime_float, ...)` on runtime value → `@as(usize, @intFromFloat(...))`.
+
+### Verified
+
+- 2nd+3rd requests served from cache (335B each)
+- `cache_hits=2`, `cache_misses=1`, `cache_puts=1`
+
 ## v0.2.3 — 2026-07-22
 
 Proxy production-readiness: upstream response parsing (status line + headers
