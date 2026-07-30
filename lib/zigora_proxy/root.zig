@@ -146,11 +146,11 @@ pub fn HttpProxy(comptime T: type) type {
 
         /// Full Pingora lifecycle: parse → filter → framework /metrics|/admin
         /// intercept → retry loop → proxyToH1 → filters → log.
-        pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
-            var read_buf: [4096]u8 = undefined;
-            var write_buf: [4096]u8 = undefined;
-            var reader = net.Stream.reader(stream, io, &read_buf);
-            var writer = net.Stream.writer(stream, io, &write_buf);
+        pub fn process_new(self: *Self, io: Io, stream: Stream, bufs: *core.PerRequestBuffers) error{ProcessFailed}!?Stream {
+            const read_buf = &bufs.read;
+            const write_buf = &bufs.write;
+            var reader = net.Stream.reader(stream, io, read_buf);
+            var writer = net.Stream.writer(stream, io, write_buf);
 
             const raw = reader.interface.peekGreedy(1) catch |err| switch (err) {
                 error.EndOfStream => return null,
@@ -159,7 +159,7 @@ pub fn HttpProxy(comptime T: type) type {
             if (raw.len == 0) return null;
 
             var ctx = ProxyHttp(T).newCtx(self.inner);
-            const request = http.Request.parse(read_buf[0..raw.len]) catch {
+            const request = http.Request.parse(read_buf.*[0..raw.len]) catch {
                 log.info("proxy: (unparsable request)", .{});
                 return error.ProcessFailed;
             };
@@ -228,7 +228,7 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
@@ -289,6 +289,7 @@ fn proxyToH1(
     upstream_bytes: ?*std.atomic.Value(usize),
     downstream_bytes: ?*std.atomic.Value(usize),
     session_capture: *Session(Ctx),
+    bufs: *core.PerRequestBuffers,
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -307,7 +308,7 @@ fn proxyToH1(
     // read upstream response — peek until we have full headers
     var ups_read_buf: [4096]u8 = undefined;
     var ups_reader = net.Stream.reader(ups, io, &ups_read_buf);
-    var header_buf: [8192]u8 = undefined;
+    const header_buf = &bufs.header;
     var header_len: usize = 0;
 
     // accumulate until we find \r\n\r\n (end of headers)
@@ -322,13 +323,13 @@ fn proxyToH1(
         if (need == 0) return .failed; // headers too large
 
         const n = @min(slice.len, need);
-        @memcpy(header_buf[header_len..][0..n], slice[0..n]);
+        @memcpy(header_buf.*[header_len..][0..n], slice[0..n]);
         header_len += n;
         _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
 
         // check if we have complete headers (\r\n\r\n)
         if (header_len >= 4) {
-            if (std.mem.eql(u8, header_buf[header_len - 4..header_len], "\r\n\r\n")) {
+            if (std.mem.eql(u8, header_buf.*[header_len - 4..header_len], "\r\n\r\n")) {
                 break;
             }
         }
@@ -337,9 +338,9 @@ fn proxyToH1(
     if (header_len == 0) return .failed;
 
     // parse response headers
-    const resp = http.ResponseHeader.parse(header_buf[0..header_len]) catch {
+    const resp = http.ResponseHeader.parse(header_buf.*[0..header_len]) catch {
         // not a valid HTTP response — forward raw and return
-        client_writer.writeAll(header_buf[0..header_len]) catch return .failed;
+        client_writer.writeAll(header_buf.*[0..header_len]) catch return .failed;
         // stream rest
         while (true) {
             const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
@@ -358,7 +359,7 @@ fn proxyToH1(
     session_capture.response = resp;
 
     // write headers to client immediately
-    client_writer.writeAll(header_buf[0..resp.body_start]) catch return .failed;
+    client_writer.writeAll(header_buf.*[0..resp.body_start]) catch return .failed;
 
     // determine body transfer mode
     const content_length = findHeader(resp.headers, "content-length");

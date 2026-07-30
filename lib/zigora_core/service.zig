@@ -12,6 +12,9 @@ const net = std.Io.net;
 const listeners_mod = @import("listeners.zig");
 const server_mod = @import("server.zig");
 const ShutdownWatch = server_mod.ShutdownWatch;
+const buffer_pool_mod = @import("buffer_pool.zig");
+const BufferPool = buffer_pool_mod.BufferPool;
+const PerRequestBuffers = buffer_pool_mod.PerRequestBuffers;
 const Stream = net.Stream;
 
 pub const zgcore_service = @This();
@@ -24,7 +27,7 @@ pub const ServerApp = struct {
     userdata: *anyopaque,
 
     pub const VTable = struct {
-        process_new: *const fn (app: *ServerApp, io: Io, stream: Stream) error{ProcessFailed}!?Stream,
+        process_new: *const fn (app: *ServerApp, io: Io, stream: Stream, bufs: *PerRequestBuffers) error{ProcessFailed}!?Stream,
         cleanup: *const fn (app: *ServerApp, io: Io) void = defaultCleanup,
     };
 
@@ -35,9 +38,9 @@ pub const ServerApp = struct {
 
     pub fn implement(comptime T: type, instance: *T) ServerApp {
         const Wrap = struct {
-            fn process_new(app: *ServerApp, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
+            fn process_new(app: *ServerApp, io: Io, stream: Stream, bufs: *PerRequestBuffers) error{ProcessFailed}!?Stream {
                 const self: *T = @ptrCast(@alignCast(app.userdata));
-                return self.process_new(io, stream);
+                return self.process_new(io, stream, bufs);
             }
             fn cleanup(app: *ServerApp, io: Io) void {
                 const self: *T = @ptrCast(@alignCast(app.userdata));
@@ -53,8 +56,8 @@ pub const ServerApp = struct {
         };
     }
 
-    pub fn processNew(app: *ServerApp, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
-        return app.vtable.process_new(app, io, stream);
+    pub fn processNew(app: *ServerApp, io: Io, stream: Stream, bufs: *PerRequestBuffers) error{ProcessFailed}!?Stream {
+        return app.vtable.process_new(app, io, stream, bufs);
     }
 
     pub fn cleanup(app: *ServerApp, io: Io) void {
@@ -82,6 +85,7 @@ pub fn Service(comptime App: type) type {
         shutdown_watch: ?ShutdownWatch = null,
         onAccept: ?*const fn (*App) void = null,
         onFinish: ?*const fn (*App) void = null,
+        buffer_pool: BufferPool = BufferPool.init(),
 
         const Self = @This();
 
@@ -137,7 +141,8 @@ pub fn Service(comptime App: type) type {
 
         fn handleConn(self: *Self, io: Io, stream: Stream) void {
             defer if (self.onFinish) |cb| cb(&self.app);
-            const reused = self.app.process_new(io, stream) catch |err| {
+            const bufs = self.buffer_pool.borrow();
+            const reused = self.app.process_new(io, stream, bufs) catch |err| {
                 log.warn("core: process_new failed: {s}", .{@errorName(err)});
                 stream.close(io);
                 return;
