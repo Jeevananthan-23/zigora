@@ -149,7 +149,6 @@ pub fn HttpProxy(comptime T: type) type {
         pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
             var read_buf: [4096]u8 = undefined;
             var write_buf: [4096]u8 = undefined;
-            var resp_buf: [8192]u8 = undefined;
             var reader = net.Stream.reader(stream, io, &read_buf);
             var writer = net.Stream.writer(stream, io, &write_buf);
 
@@ -222,7 +221,6 @@ pub fn HttpProxy(comptime T: type) type {
 
             // ---- retry loop ----
             var retries: usize = 0;
-            var resp_out: []const u8 = &.{};
             while (retries <= self.max_retries) : (retries += 1) {
                 if (retries > 0) {
                     session.peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
@@ -230,13 +228,10 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, &resp_buf, &resp_out);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
-                    // cache the response (callback must dupe — resp_out points
-                    // into a stack buffer that's freed on return)
-                    if (self.cachePut) |put| put(request.path, resp_out);
                     break;
                 }
                 if (self.onUpstreamError) |cb| cb(self.inner);
@@ -280,11 +275,11 @@ pub fn http_proxy_service(
     return core.service_mod.Service(HttpProxy(T)).init(name, HttpProxy(T).init(impl, backend));
 }
 
-// ---- proxyToH1: upstream dispatch + response parse + body stream ----
+// ---- proxyToH1: upstream dispatch + streaming response ----
 
-/// Connect to upstream, write raw request bytes, buffer + parse the upstream
-/// response, write headers + body to client writer. Returns `.ok` on success,
-/// `.failed` for connection/IO errors, `.blocked` for filter denials.
+/// Connect to upstream, write raw request bytes, stream response back to
+/// client. Parses headers first, then streams body chunks directly
+/// (no full-buffer copy). Handles Content-Length and chunked encoding.
 fn proxyToH1(
     io: Io,
     host: []const u8,
@@ -294,8 +289,6 @@ fn proxyToH1(
     upstream_bytes: ?*std.atomic.Value(usize),
     downstream_bytes: ?*std.atomic.Value(usize),
     session_capture: *Session(Ctx),
-    resp_buf: []u8,
-    resp_out: *[]const u8,
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -311,41 +304,189 @@ fn proxyToH1(
         ups_writer.interface.flush() catch return .failed;
     }
 
-    // buffer upstream response (Pingora uses streaming HttpTask; we copy into
-    // an 8k response buf for simplicity, parse, then forward to client)
+    // read upstream response — peek until we have full headers
     var ups_read_buf: [4096]u8 = undefined;
     var ups_reader = net.Stream.reader(ups, io, &ups_read_buf);
-    var resp_len: usize = 0;
+    var header_buf: [8192]u8 = undefined;
+    var header_len: usize = 0;
 
-    while (resp_len < resp_buf.len) {
+    // accumulate until we find \r\n\r\n (end of headers)
+    while (true) {
         const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return .failed,
         };
         if (slice.len == 0) break;
-        const n = @min(slice.len, resp_buf.len - resp_len);
-        @memcpy(resp_buf[resp_len..][0..n], slice[0..n]);
-        resp_len += n;
-        if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
+
+        const need = header_buf.len - header_len;
+        if (need == 0) return .failed; // headers too large
+
+        const n = @min(slice.len, need);
+        @memcpy(header_buf[header_len..][0..n], slice[0..n]);
+        header_len += n;
         _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
+
+        // check if we have complete headers (\r\n\r\n)
+        if (header_len >= 4) {
+            if (std.mem.eql(u8, header_buf[header_len - 4..header_len], "\r\n\r\n")) {
+                break;
+            }
+        }
     }
 
-    if (resp_len > 0) {
-        resp_out.* = resp_buf[0..resp_len];
-        // parse upstream response, store on session for filters + logging
-        if (http.ResponseHeader.parse(resp_buf[0..resp_len])) |parsed| {
-            session_capture.response = parsed;
-            client_writer.writeAll(resp_buf[0..parsed.body_start]) catch return .failed;
-            if (resp_len > parsed.body_start) {
-                client_writer.writeAll(resp_buf[parsed.body_start..resp_len]) catch return .failed;
-            }
-        } else |_| {
-            client_writer.writeAll(resp_buf[0..resp_len]) catch return .failed;
+    if (header_len == 0) return .failed;
+
+    // parse response headers
+    const resp = http.ResponseHeader.parse(header_buf[0..header_len]) catch {
+        // not a valid HTTP response — forward raw and return
+        client_writer.writeAll(header_buf[0..header_len]) catch return .failed;
+        // stream rest
+        while (true) {
+            const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return .failed,
+            };
+            if (slice.len == 0) break;
+            client_writer.writeAll(slice) catch return .failed;
+            _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return .failed;
         }
         client_writer.flush() catch return .failed;
+        return .ok;
+    };
+
+    // store on session for filters + logging
+    session_capture.response = resp;
+
+    // write headers to client immediately
+    client_writer.writeAll(header_buf[0..resp.body_start]) catch return .failed;
+
+    // determine body transfer mode
+    const content_length = findHeader(resp.headers, "content-length");
+    const transfer_encoding = findHeader(resp.headers, "transfer-encoding");
+    const is_chunked = transfer_encoding != null and std.mem.eql(u8, transfer_encoding.?, "chunked");
+    const has_content_length = content_length != null;
+
+    var body_remaining: usize = 0;
+    if (has_content_length) {
+        body_remaining = std.fmt.parseInt(usize, content_length.?, 10) catch 0;
     }
 
+    // stream body
+    if (is_chunked) {
+        // chunked encoding: read chunk-size + data + CRLF
+        var chunk_remaining: usize = 0;
+        var reading_chunk_size = true;
+
+        while (true) {
+            if (reading_chunk_size) {
+                // read chunk size line (hex + \r\n)
+                const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    else => return .failed,
+                };
+                if (slice.len == 0) break;
+
+                // find end of chunk-size line
+                const line_end = std.mem.indexOfPos(u8, slice, 0, "\r\n") orelse {
+                    // need more data
+                    _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return .failed;
+                    continue;
+                };
+                const size_line = slice[0..line_end];
+                chunk_remaining = std.fmt.parseInt(usize, size_line, 16) catch return .failed;
+
+                const consumed = line_end + 2; // chunk-size + \r\n
+                _ = ups_reader.interface.discard(Io.Limit.limited(consumed)) catch return .failed;
+
+                if (chunk_remaining == 0) {
+                    // last chunk — read trailers (if any) then final \r\n
+                    while (true) {
+                        const trailer_slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
+                            error.EndOfStream => break,
+                            else => return .failed,
+                        };
+                        if (trailer_slice.len == 0) break;
+                        if (std.mem.eql(u8, trailer_slice[0..@min(2, trailer_slice.len)], "\r\n")) {
+                            _ = ups_reader.interface.discard(Io.Limit.limited(2)) catch return .failed;
+                            break;
+                        }
+                        _ = ups_reader.interface.discard(Io.Limit.limited(trailer_slice.len)) catch return .failed;
+                    }
+                    break;
+                }
+                reading_chunk_size = false;
+            } else {
+                // read chunk data
+                const slice = ups_reader.interface.peekGreedy(chunk_remaining) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    else => return .failed,
+                };
+                if (slice.len == 0) break;
+
+                const n = @min(slice.len, chunk_remaining);
+                client_writer.writeAll(slice[0..n]) catch return .failed;
+                if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
+
+                chunk_remaining -= n;
+                _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
+
+                if (chunk_remaining == 0) {
+                    // consume trailing \r\n after chunk
+                    const crlf = ups_reader.interface.peekGreedy(2) catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        else => return .failed,
+                    };
+                    if (crlf.len >= 2) {
+                        _ = ups_reader.interface.discard(Io.Limit.limited(2)) catch return .failed;
+                    }
+                    reading_chunk_size = true;
+                }
+            }
+        }
+    } else if (has_content_length) {
+        // fixed Content-Length: stream exactly body_remaining bytes
+        while (body_remaining > 0) {
+            const slice = ups_reader.interface.peekGreedy(body_remaining) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return .failed,
+            };
+            if (slice.len == 0) break;
+
+            const n = @min(slice.len, body_remaining);
+            client_writer.writeAll(slice[0..n]) catch return .failed;
+            if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
+
+            body_remaining -= n;
+            _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
+        }
+    } else {
+        // no Content-Length, no chunked — read until EOF (Connection: close)
+        while (true) {
+            const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return .failed,
+            };
+            if (slice.len == 0) break;
+
+            client_writer.writeAll(slice) catch return .failed;
+            if (downstream_bytes) |ctr| _ = ctr.fetchAdd(slice.len, .monotonic);
+
+            _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return .failed;
+        }
+    }
+
+    client_writer.flush() catch return .failed;
     return .ok;
+}
+
+fn findHeader(headers: []const http.Header, name: []const u8) ?[]const u8 {
+    const lower_first = std.ascii.toLower(name[0]);
+    for (headers) |h| {
+        if (std.ascii.toLower(h.name[0]) == lower_first) {
+            if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        }
+    }
+    return null;
 }
 
 // ===== Tests =====
