@@ -259,9 +259,9 @@ pub fn HttpProxy(comptime T: type) type {
             if (self.vtable.logging) |f| {
                 f(self.inner, &session, &ctx, null);
             } else if (session.response) |resp| {
-                log.info("proxy: {s} {s} → {d}", .{ @tagName(request.method), request.path, resp.status_code });
+                log.debug("proxy: {s} {s} → {d}", .{ @tagName(request.method), request.path, resp.status_code });
             } else {
-                log.info("proxy: {s} {s}", .{ @tagName(request.method), request.path });
+                log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
             return null;

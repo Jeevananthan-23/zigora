@@ -55,7 +55,7 @@ const MyProxy = struct {
             ctx.backend_host = "127.0.0.1";
             ctx.backend_port = std.Io.net.IpAddress.getPort(b.addr);
         }
-        log.info("routing to {s}:{d}", .{ ctx.backend_host, ctx.backend_port });
+        log.debug("routing to {s}:{d}", .{ ctx.backend_host, ctx.backend_port });
         return .{ .host = ctx.backend_host, .port = ctx.backend_port };
     }
 };

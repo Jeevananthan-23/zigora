@@ -103,7 +103,7 @@ pub fn Service(comptime App: type) type {
             if (built.len == 0) return error.NoEndpoints;
 
             var listener = built[0];
-            log.info("core: service '{s}' listening", .{self.name});
+            log.debug("core: service '{s}' listening", .{self.name});
 
             const sh = self.shutdown_watch orelse {
                 // no shutdown watch set: run forever
