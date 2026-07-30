@@ -106,11 +106,39 @@ pub fn Service(comptime App: type) type {
             defer allocator.free(built);
             if (built.len == 0) return error.NoEndpoints;
 
-            var listener = built[0];
-            log.debug("core: service '{s}' listening", .{self.name});
+            log.debug("core: service '{s}' starting on {d} listener(s)", .{ self.name, built.len });
 
-            const sh = self.shutdown_watch orelse {
-                // no shutdown watch set: run forever
+            const sh = self.shutdown_watch;
+
+            if (built.len <= 1) {
+                // single listener — accept loop inline
+                var listener = built[0];
+                self.acceptLoop(io, &listener, sh);
+            } else {
+                // multi-listener: spawn N accept futures, join them
+                const AcceptFuture = std.Io.Future(void);
+                const futures = try allocator.alloc(AcceptFuture, built.len);
+                defer allocator.free(futures);
+
+                const LoopAdapter = struct {
+                    fn run(svc: *Self, ioval: Io, l: *net.Server, shutdown: ?server_mod.ShutdownWatch) void {
+                        svc.acceptLoop(ioval, l, shutdown);
+                    }
+                };
+
+                for (built, 0..) |*l, i| {
+                    futures[i] = io.async(LoopAdapter.run, .{ self, io, l, sh });
+                }
+                for (futures) |*f| {
+                    _ = f.await(io);
+                }
+            }
+            log.info("core: service '{s}' shutting down", .{self.name});
+        }
+
+        fn acceptLoop(self: *Self, io: Io, listener: *net.Server, sh: ?server_mod.ShutdownWatch) void {
+            const no_shutdown = (sh == null);
+            if (no_shutdown) {
                 while (true) {
                     var stream = listener.accept(io) catch |err| {
                         log.warn("core: accept failed: {s}", .{@errorName(err)});
@@ -121,22 +149,21 @@ pub fn Service(comptime App: type) type {
                         log.warn("core: dispatch failed: {s}", .{@errorName(err)});
                         stream.close(io);
                     };
-                    }
-            };
-            // with shutdown watch: poll on every accept iteration
-            while (!sh.check()) {
-                var stream = listener.accept(io) catch |err| {
-                    if (sh.check()) return;
-                    log.warn("core: accept failed: {s}", .{@errorName(err)});
-                    continue;
-                };
-                if (self.onAccept) |cb| cb(&self.app);
-                self.inflight.concurrent(io, handleConn, .{ self, io, stream }) catch |err| {
-                    log.warn("core: dispatch failed: {s}", .{@errorName(err)});
-                    stream.close(io);
-                };
+                }
+            } else {
+                while (!sh.?.check()) {
+                    var stream = listener.accept(io) catch |err| {
+                        if (sh.?.check()) return;
+                        log.warn("core: accept failed: {s}", .{@errorName(err)});
+                        continue;
+                    };
+                    if (self.onAccept) |cb| cb(&self.app);
+                    self.inflight.concurrent(io, handleConn, .{ self, io, stream }) catch |err| {
+                        log.warn("core: dispatch failed: {s}", .{@errorName(err)});
+                        stream.close(io);
+                    };
+                }
             }
-            log.info("core: service '{s}' shutting down", .{self.name});
         }
 
         fn handleConn(self: *Self, io: Io, stream: Stream) void {
