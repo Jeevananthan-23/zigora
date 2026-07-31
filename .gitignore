@@ -407,3 +407,4 @@ zig-pkg/
 # Compiled object files and temporary documents
 *.o
 /docgen_tmp/
+.agents

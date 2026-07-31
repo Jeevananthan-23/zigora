@@ -286,9 +286,12 @@ pub fn HttpProxy(comptime T: type) type {
                 log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
-            // ponytail: keepalive disabled for v0.4-alpha stability.
-            // re-enable when downstream connection reuse is battle-tested.
-            return null;
+            // keepalive: HTTP/1.1 without Connection: close reuses the stream
+            const keep_alive = request.version == .http11 and !connectionWantsClose(&request);
+            if (!keep_alive) {
+                stream.close(io);
+            }
+            return if (keep_alive) stream else null;
         }
 
         pub fn cleanup(_: *Self, _: Io) void {}
@@ -586,9 +589,14 @@ fn findHeader(headers: []const http.Header, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn requestWantsClose(req: http.Request) bool {
-    const conn = findHeader(req.headers, "connection");
-    return conn != null and std.ascii.eqlIgnoreCase(conn.?, "close");
+fn connectionWantsClose(req: *const http.Request) bool {
+    for (req.headers) |h| {
+        if (h.name.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(h.name, "connection")) {
+            return std.ascii.eqlIgnoreCase(h.value, "close");
+        }
+    }
+    return false;
 }
 
 fn ip4AddrKey(ip4: net.Ip4Address) pool.GroupKey {

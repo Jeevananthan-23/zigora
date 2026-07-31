@@ -13,7 +13,6 @@ const listeners_mod = @import("listeners.zig");
 const server_mod = @import("server.zig");
 const ShutdownWatch = server_mod.ShutdownWatch;
 const buffer_pool_mod = @import("buffer_pool.zig");
-const BufferPool = buffer_pool_mod.BufferPool;
 const PerRequestBuffers = buffer_pool_mod.PerRequestBuffers;
 const Stream = net.Stream;
 
@@ -85,7 +84,6 @@ pub fn Service(comptime App: type) type {
         shutdown_watch: ?ShutdownWatch = null,
         onAccept: ?*const fn (*App) void = null,
         onFinish: ?*const fn (*App) void = null,
-        buffer_pool: BufferPool = BufferPool.init(),
 
         const Self = @This();
 
@@ -168,14 +166,15 @@ pub fn Service(comptime App: type) type {
 
         fn handleConn(self: *Self, io: Io, stream: Stream) void {
             defer if (self.onFinish) |cb| cb(&self.app);
-            const bufs = self.buffer_pool.borrow();
-            const reused = self.app.process_new(io, stream, bufs) catch |err| {
-                log.warn("core: process_new failed: {s}", .{@errorName(err)});
-                stream.close(io);
-                return;
-            };
-            if (reused) |r| {
-                r.close(io);
+            var bufs = PerRequestBuffers{};
+            var conn = stream;
+            while (true) {
+                const reused = self.app.process_new(io, conn, &bufs) catch |err| {
+                    log.warn("core: process_new failed: {s}", .{@errorName(err)});
+                    conn.close(io);
+                    return;
+                };
+                if (reused) |r| conn = r else { conn.close(io); return; }
             }
         }
     };
