@@ -5,6 +5,7 @@
 //! v0.2: signal handlers, FD transfer, keepalive — see V0.2_ROADMAP.md phase 4.
 
 const std = @import("std");
+const posix = std.posix;
 const log = std.log.scoped(.core);
 const Io = std.Io;
 const service_mod = @import("service.zig");
@@ -46,6 +47,27 @@ pub const ShutdownWatch = struct {
     }
 };
 
+/// ponytail: global pointer for signal handler; single-Server per process covers v0.2
+var global_server: ?*Server = null;
+
+fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
+    _ = sig;
+    if (global_server) |s| s.shutdown();
+}
+
+/// Install SIGTERM/SIGINT handlers. Only one `Server` per process.
+pub fn installSignalHandlers(server: *Server) !void {
+    global_server = server;
+    const mask = std.posix.sigemptyset();
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = signalHandler },
+        .mask = mask,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+}
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     conf: ServerConf,
@@ -81,6 +103,8 @@ pub const Server = struct {
     /// then block on each future. Accept loops poll `shutdownWatch()`.
     pub fn runForever(self: *Server, io: Io) !void {
         if (self.services.items.len == 0) return error.NoServices;
+        try zgcore_server.installSignalHandlers(self);
+
         log.info("core: server starting {d} service(s)", .{self.services.items.len});
 
         _ = self.phase_.swap(ExecutionPhase.Running, .acq_rel);

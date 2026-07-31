@@ -13,6 +13,7 @@ const net = std.Io.net;
 const core = @import("zigora-core");
 const http = @import("zigora-http");
 const zgerror = @import("zigora-error");
+const pool = @import("zigora-pool");
 const Stream = net.Stream;
 
 pub const zgproxy = @This();
@@ -114,6 +115,7 @@ pub fn HttpProxy(comptime T: type) type {
         onUpstreamError: ?*const fn (*T) void = null,
         upstreamBytes: ?*std.atomic.Value(usize) = null,
         downstreamBytes: ?*std.atomic.Value(usize) = null,
+        upstream_pool: ?*pool.ConnectionPool(Stream) = null,
         /// Framework-level handler: renders Prometheus metrics → writer. Called
         /// for GET /metrics before upstream dispatch.
         renderMetrics: ?*const fn (*Io.Writer) void = null,
@@ -228,7 +230,7 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs, self.upstream_pool);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
@@ -259,6 +261,9 @@ pub fn HttpProxy(comptime T: type) type {
                 log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
+            if (request.version == .http11 and !requestWantsClose(request)) {
+                return stream;
+            }
             return null;
         }
 
@@ -290,11 +295,17 @@ fn proxyToH1(
     downstream_bytes: ?*std.atomic.Value(usize),
     session_capture: *Session(Ctx),
     bufs: *core.PerRequestBuffers,
+    upstream_pool: ?*pool.ConnectionPool(Stream),
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
-    var ups = net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch return .failed;
-    defer ups.close(io);
+    const pool_key = ip4AddrKey(ip4);
+
+    var ups: Stream = if (upstream_pool) |p| p.get(pool_key) orelse net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch return .failed else net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch return .failed;
+    var pooled: bool = false;
+    defer {
+        if (!pooled) ups.close(io);
+    }
 
     // send request to upstream
     if (client_buf.len > 0) {
@@ -477,6 +488,25 @@ fn proxyToH1(
     }
 
     client_writer.flush() catch return .failed;
+
+    // pool the upstream connection if pool present and response allows keepalive
+    if (upstream_pool) |p| {
+        if (session_capture.response) |upstream_resp| {
+            const up_conn_hdr = findHeader(upstream_resp.headers, "connection");
+            const wants_close = up_conn_hdr != null and std.ascii.eqlIgnoreCase(up_conn_hdr.?, "close");
+            if (!wants_close) {
+                const meta: pool.ConnectionMeta(Stream) = .{
+                    .key = pool_key,
+                    .id = ups.socket.handle,
+                    .data = ups,
+                };
+                const evicted = p.put(pool_key, meta);
+                if (evicted) |ev| ev.data.close(io);
+                pooled = true;
+            }
+        }
+    }
+
     return .ok;
 }
 
@@ -488,6 +518,18 @@ fn findHeader(headers: []const http.Header, name: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+fn requestWantsClose(req: http.Request) bool {
+    const conn = findHeader(req.headers, "connection");
+    return conn != null and std.ascii.eqlIgnoreCase(conn.?, "close");
+}
+
+fn ip4AddrKey(ip4: net.Ip4Address) pool.GroupKey {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(&ip4.bytes);
+    hasher.update(std.mem.asBytes(&ip4.port));
+    return hasher.final();
 }
 
 // ===== Tests =====

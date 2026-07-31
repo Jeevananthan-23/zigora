@@ -169,13 +169,14 @@ pub fn Service(comptime App: type) type {
         fn handleConn(self: *Self, io: Io, stream: Stream) void {
             defer if (self.onFinish) |cb| cb(&self.app);
             const bufs = self.buffer_pool.borrow();
-            const reused = self.app.process_new(io, stream, bufs) catch |err| {
-                log.warn("core: process_new failed: {s}", .{@errorName(err)});
-                stream.close(io);
-                return;
-            };
-            if (reused) |r| {
-                r.close(io);
+            var conn = stream;
+            while (true) {
+                const reused = self.app.process_new(io, conn, bufs) catch |err| {
+                    log.warn("core: process failed: {s}", .{@errorName(err)});
+                    conn.close(io);
+                    return;
+                };
+                if (reused) |r| conn = r else { conn.close(io); return; }
             }
         }
     };

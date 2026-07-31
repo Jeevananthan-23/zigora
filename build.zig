@@ -100,6 +100,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigora-core", .module = core_mod },
             .{ .name = "zigora-http", .module = http_mod },
             .{ .name = "zigora-error", .module = error_mod },
+            .{ .name = "zigora-pool", .module = pool_mod },
         },
     });
 
