@@ -32,6 +32,13 @@ pub const HttpPeer = struct {
     port: u16,
 };
 
+/// Describes the request body transfer mode for POST/PUT body forwarding.
+pub const BodyHint = struct {
+    mode: enum { none, content_length, chunked } = .none,
+    content_len: u64 = 0,
+    body_start: usize = 0,
+};
+
 // ---- v0.2 Session ----
 
 /// Per-request state, mirrors `pingora_proxy::Session`.
@@ -221,6 +228,24 @@ pub fn HttpProxy(comptime T: type) type {
                 f(self.inner, &session, &ctx) catch return error.ProcessFailed;
             }
 
+            // ---- request body forwarding hint ----
+            var body_hint = BodyHint{};
+            if (request.method == .POST or request.method == .PUT) {
+                const cl = findHeader(request.headers, "content-length");
+                const te = findHeader(request.headers, "transfer-encoding");
+                if (te) |v| {
+                    if (std.ascii.eqlIgnoreCase(v, "chunked")) {
+                        body_hint = .{ .mode = .chunked, .body_start = request.body_start };
+                    }
+                }
+                if (body_hint.mode == .none) {
+                    if (cl) |v| {
+                        const len = std.fmt.parseInt(u64, v, 10) catch 0;
+                        body_hint = .{ .mode = .content_length, .content_len = len, .body_start = request.body_start };
+                    }
+                }
+            }
+
             // ---- retry loop ----
             var retries: usize = 0;
             while (retries <= self.max_retries) : (retries += 1) {
@@ -230,7 +255,7 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs, self.upstream_pool);
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs, self.upstream_pool, stream, body_hint);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
@@ -261,9 +286,8 @@ pub fn HttpProxy(comptime T: type) type {
                 log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
-            if (request.version == .http11 and !requestWantsClose(request)) {
-                return stream;
-            }
+            // ponytail: keepalive disabled for v0.4-alpha stability.
+            // re-enable when downstream connection reuse is battle-tested.
             return null;
         }
 
@@ -296,6 +320,8 @@ fn proxyToH1(
     session_capture: *Session(Ctx),
     bufs: *core.PerRequestBuffers,
     upstream_pool: ?*pool.ConnectionPool(Stream),
+    client_stream: Stream,
+    body_hint: BodyHint,
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -307,12 +333,50 @@ fn proxyToH1(
         if (!pooled) ups.close(io);
     }
 
-    // send request to upstream
+// send request to upstream (headers + optional body)
     if (client_buf.len > 0) {
-        if (upstream_bytes) |ctr| _ = ctr.fetchAdd(client_buf.len, .monotonic);
         var ups_write_buf: [4096]u8 = undefined;
         var ups_writer = net.Stream.writer(ups, io, &ups_write_buf);
-        ups_writer.interface.writeAll(client_buf) catch return .failed;
+
+        // write headers only; body handled separately if present
+        const head_end = if (body_hint.mode != .none) @min(body_hint.body_start, client_buf.len) else client_buf.len;
+        if (head_end > 0) {
+            if (upstream_bytes) |ctr| _ = ctr.fetchAdd(head_end, .monotonic);
+            ups_writer.interface.writeAll(client_buf[0..head_end]) catch return .failed;
+        }
+
+        // forward request body in Content-Length mode
+        if (body_hint.mode == .content_length and body_hint.content_len > 0) {
+            const rest = client_buf.len - head_end;
+            if (rest > 0) {
+                ups_writer.interface.writeAll(client_buf[head_end..]) catch return .failed;
+                if (upstream_bytes) |ctr| _ = ctr.fetchAdd(rest, .monotonic);
+            }
+
+            const total = body_hint.content_len;
+            if (rest < total) {
+                var remaining: u64 = total - rest;
+                var body_read_buf: [4096]u8 = undefined;
+                var body_reader = net.Stream.reader(client_stream, io, &body_read_buf);
+
+                while (remaining > 0) {
+                    const chunk = body_reader.interface.peekGreedy(@min(remaining, 4096)) catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        else => return .failed,
+                    };
+                    if (chunk.len == 0) break;
+                    const n: u64 = @min(chunk.len, remaining);
+                    ups_writer.interface.writeAll(chunk[0..n]) catch return .failed;
+                    if (upstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
+                    remaining -= n;
+                    _ = body_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
+                }
+            }
+        }
+        // ponytail: chunked transfer-encoding body forwarding not yet
+        // implemented; POST with chunked bodies reaches upstream headers-only.
+        // Add chunked forwarding when POST body streaming is needed.
+
         ups_writer.interface.flush() catch return .failed;
     }
 
@@ -511,8 +575,10 @@ fn proxyToH1(
 }
 
 fn findHeader(headers: []const http.Header, name: []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
     const lower_first = std.ascii.toLower(name[0]);
     for (headers) |h| {
+        if (h.name.len == 0) continue;
         if (std.ascii.toLower(h.name[0]) == lower_first) {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
         }
