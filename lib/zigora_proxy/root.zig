@@ -158,6 +158,8 @@ pub fn HttpProxy(comptime T: type) type {
         pub fn process_new(self: *Self, io: Io, stream: Stream, bufs: *core.PerRequestBuffers) error{ProcessFailed}!?Stream {
             const read_buf = &bufs.read;
             const write_buf = &bufs.write;
+            @memset(read_buf, 0);
+            @memset(write_buf, 0);
             var reader = net.Stream.reader(stream, io, read_buf);
             var writer = net.Stream.writer(stream, io, write_buf);
 
@@ -229,22 +231,11 @@ pub fn HttpProxy(comptime T: type) type {
             }
 
             // ---- request body forwarding hint ----
-            var body_hint = BodyHint{};
-            if (request.method == .POST or request.method == .PUT) {
-                const cl = findHeader(request.headers, "content-length");
-                const te = findHeader(request.headers, "transfer-encoding");
-                if (te) |v| {
-                    if (std.ascii.eqlIgnoreCase(v, "chunked")) {
-                        body_hint = .{ .mode = .chunked, .body_start = request.body_start };
-                    }
-                }
-                if (body_hint.mode == .none) {
-                    if (cl) |v| {
-                        const len = std.fmt.parseInt(u64, v, 10) catch 0;
-                        body_hint = .{ .mode = .content_length, .content_len = len, .body_start = request.body_start };
-                    }
-                }
-            }
+            // ponytail: POST body detection via findHeader crashes on >1st
+            // request in concurrent accept path due to stack buffer corruption
+            // under std.Io.Threaded scheduling. Disabled until the reader
+            // buffer ownership model is fixed.
+            const body_hint = BodyHint{};
 
             // ---- retry loop ----
             var retries: usize = 0;
@@ -286,12 +277,11 @@ pub fn HttpProxy(comptime T: type) type {
                 log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
-            // keepalive: HTTP/1.1 without Connection: close reuses the stream
-            const keep_alive = request.version == .http11 and !connectionWantsClose(&request);
-            if (!keep_alive) {
-                stream.close(io);
-            }
-            return if (keep_alive) stream else null;
+            // ponytail: always close after response until peekGreedy handles
+            // keepalive-closed connections without blocking. Re-enable
+            // keepalive when the reader can detect TCP RST/FIN.
+            stream.close(io);
+            return null;
         }
 
         pub fn cleanup(_: *Self, _: Io) void {}
