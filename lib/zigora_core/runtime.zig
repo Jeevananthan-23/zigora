@@ -3,7 +3,7 @@
 //! connections are dispatched to a random engine (pingora's
 //! `current_handle()`), so no queue is ever shared between connections.
 //!
-//! See ARCHITECTURE.md §3 and V0.4_ROADMAP.md 3.1 (scheduler residual).
+//! See docs/ARCHITECTURE.md §3 and docs/V0.4_ROADMAP.md 3.1 (scheduler residual).
 
 const std = @import("std");
 const Io = std.Io;

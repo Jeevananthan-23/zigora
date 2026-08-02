@@ -1,5 +1,5 @@
 //! Port of tinyufo: TinyLFU admission + S3-FIFO eviction in-memory cache.
-//! See V0.2_ROADMAP.md phase 1.5.
+//! See docs/V0.2_ROADMAP.md phase 1.5.
 //!
 //! Lazy port: ONE mutex around the whole structure (Pingora's crate is
 //! lock-free). Plain `std.ArrayList` FIFOs instead of `SegQueue`. Same

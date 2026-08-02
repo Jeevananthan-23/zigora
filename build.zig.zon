@@ -77,6 +77,6 @@
         "lib",
         // For example...
         //"LICENSE",
-        //"README.md",
+        //"docs/README.md",
     },
 }

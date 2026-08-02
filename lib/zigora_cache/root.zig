@@ -1,5 +1,5 @@
 //! Port of pingora-cache: HTTP cache state machine + trait interfaces.
-//! See V0.2_ROADMAP.md phase 2.9.
+//! See docs/V0.2_ROADMAP.md phase 2.9.
 //!
 //! Surface ported: `HttpCache` phase machine, `CachePhase`, `NoCacheReason`,
 //! `RespCacheable`, `HitStatus`, `Storage`/`HitHandler`/`MissHandler`/

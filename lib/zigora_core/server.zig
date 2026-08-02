@@ -2,7 +2,7 @@
 //! running on the `std.Io` worker pool (no `std.Thread`), joined via
 //! `Future.await`. Graceful shutdown via atomic flag + ShutdownWatch.
 //!
-//! v0.2: signal handlers, FD transfer, keepalive — see V0.2_ROADMAP.md phase 4.
+//! v0.2: signal handlers, FD transfer, keepalive — see docs/V0.2_ROADMAP.md phase 4.
 
 const std = @import("std");
 const posix = std.posix;

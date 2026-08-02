@@ -2,7 +2,7 @@
 //! Listeners (TCP only), Stream alias. Disjoint from `server.zig` (the old
 //! echo server) which is being removed; this file is the new home.
 //!
-//! See ARCHITECTURE.md §3 for the Pingora map.
+//! See docs/ARCHITECTURE.md §3 for the Pingora map.
 
 const std = @import("std");
 const log = std.log.scoped(.core);

@@ -1,6 +1,6 @@
 //! TLS abstraction for Zigora. v0.2 defines the interface; implementation
 //! deferred to v0.3 when a TLS backend (BoringSSL via FFI, or pure Zig)
-//! is selected. See V0.2_ROADMAP.md phase 3.11.
+//! is selected. See docs/V0.2_ROADMAP.md phase 3.11.
 
 const std = @import("std");
 const log = std.log.scoped(.tls);

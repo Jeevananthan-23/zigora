@@ -1,5 +1,5 @@
 //! Port of pingora-memory-cache: TinyUFO-backed in-memory cache with TTL
-//! and explicit cache-status reporting. See V0.2_ROADMAP.md phase 2.7.
+//! and explicit cache-status reporting. See docs/V0.2_ROADMAP.md phase 2.7.
 //!
 //! Wraps `zigora_tinyufo.TinyUfo` with a `Node<T>` carrying an optional
 //! expiry timestamp. Lazy expiration on `get` (no background sweep — matches

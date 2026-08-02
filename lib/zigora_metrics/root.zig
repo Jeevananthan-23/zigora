@@ -1,5 +1,5 @@
 //! Prometheus /metrics endpoint + Admin status page for v0.2.
-//! See V0.2_ROADMAP.md phase 4.13.
+//! See docs/V0.2_ROADMAP.md phase 4.13.
 //!
 //! Lazy: simple atomic counters + a `GET /metrics` handler that emits
 //! Prometheus text format. Admin page is a basic HTML status page.

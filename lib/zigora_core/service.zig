@@ -3,7 +3,7 @@
 //! pool — non-blocking, concurrent. Inflight connections tracked via `Group`
 //! for graceful shutdown via `group.cancel(io)`.
 //!
-//! See ARCHITECTURE.md §3 (zigora_core section).
+//! See docs/ARCHITECTURE.md §3 (zigora_core section).
 
 const std = @import("std");
 const log = std.log.scoped(.core);

@@ -1,5 +1,5 @@
 //! Port of pingora-proxy: `ProxyHttp` trait + `HttpProxy` struct.
-//! See ARCHITECTURE.md §3 (zigora_proxy section) and V0.2_ROADMAP.md phase 3.10.
+//! See docs/ARCHITECTURE.md §3 (zigora_proxy section) and docs/V0.2_ROADMAP.md phase 3.10.
 //!
 //! v0.1 surface: single-fixed-backend splice.
 //! v0.2: Session (per-request state), 14-callback vtable, retry loop.

@@ -1,5 +1,5 @@
 //! Port of pingora-limits: lock-free frequency estimators and rate-tracking.
-//! See ARCHITECTURE.md §3 (zigora_limits section) and V0.2_ROADMAP.md phase 1.2.
+//! See docs/ARCHITECTURE.md §3 (zigora_limits section) and docs/V0.2_ROADMAP.md phase 1.2.
 //!
 //! Three primitives:
 //! - `Estimator`: Count-Min Sketch, atomic counters, O(h) lookup

@@ -1,5 +1,5 @@
 //! Port of pingora-pool: generic reusable-connection pool.
-//! See V0.2_ROADMAP.md phase 2.6.
+//! See docs/V0.2_ROADMAP.md phase 2.6.
 //!
 //! Lazy port: single mutex around the whole pool (Pingora sharded with hot
 //! lock-free queue + HashMap + thread-local LRU). Skip the watch/notify

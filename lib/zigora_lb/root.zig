@@ -1,5 +1,5 @@
 //! Port of pingora-load-balancing: backend selection algorithms for v0.2.
-//! See V0.2_ROADMAP.md phase 2.8.
+//! See docs/V0.2_ROADMAP.md phase 2.8.
 //!
 //! Lazy port: `Backend`, `LoadBalancer(S)` with 4 selectors (RoundRobin,
 //! Random, FNVHash, Consistent via zigora-ketama). Health check machinery

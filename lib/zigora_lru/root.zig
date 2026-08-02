@@ -1,5 +1,5 @@
 //! Port of pingora-lru: sharded weighted LRU cache for eviction in the v0.2
-//! cache layer. See V0.2_ROADMAP.md phase 1.3.
+//! cache layer. See docs/V0.2_ROADMAP.md phase 1.3.
 //!
 //! Lazy port: N shards (`comptime`) each guarded by a `std.Thread.Mutex`,
 //! backed by `std.AutoArrayHashMap(u64, Node)` + an order list. Items are

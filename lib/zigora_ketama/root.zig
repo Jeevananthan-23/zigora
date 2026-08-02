@@ -1,5 +1,5 @@
 //! Port of pingora-ketama: nginx-compatible consistent hash ring for the v0.2
-//! load-balancer's `Consistent` selector. See V0.2_ROADMAP.md phase 1.4.
+//! load-balancer's `Consistent` selector. See docs/V0.2_ROADMAP.md phase 1.4.
 //!
 //! Lazy port: V1 only (no v2 packed repr), 160 points per weight, CRC32.
 //! Uses `std.Io.net.IpAddress` instead of Rust `SocketAddr`. `node()` lookup is

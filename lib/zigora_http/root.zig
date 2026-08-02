@@ -3,7 +3,7 @@
 //! pairs; body parsing is out of scope (the proxy forwards raw bytes after
 //! headers). HTTP/2 is v0.2+.
 //!
-//! See ARCHITECTURE.md §3.
+//! See docs/ARCHITECTURE.md §3.
 
 const std = @import("std");
 const log = std.log.scoped(.http);

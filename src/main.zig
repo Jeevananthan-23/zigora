@@ -75,7 +75,7 @@ const MyProxy = struct {
 
 pub fn main(init: std.process.Init) !void {
     // Debug/ReleaseSafe: leak-checking allocator; ReleaseFast/Small: the
-    // lock-free per-CPU smp allocator (see MEMORY_MANAGEMENT.md).
+    // lock-free per-CPU smp allocator (see docs/MEMORY_MANAGEMENT.md).
     var debug_alloc: std.heap.DebugAllocator(.{ .stack_trace_frames = 32 }) = .init;
     const allocator: std.mem.Allocator = switch (builtin.mode) {
         .Debug, .ReleaseSafe => debug_alloc.allocator(),
