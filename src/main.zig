@@ -21,11 +21,8 @@ fn renderAdmin(w: *Io.Writer) void {
 const BackendCfg = struct {
     addrs: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator) BackendCfg {
-        var addrs = std.ArrayList([]const u8).empty;
-        addrs.append(allocator, "127.0.0.1:9000") catch unreachable;
-        addrs.append(allocator, "127.0.0.1:9001") catch unreachable;
-        return .{ .addrs = addrs };
+    pub fn init(_: std.mem.Allocator) BackendCfg {
+        return .{ .addrs = std.ArrayList([]const u8).empty };
     }
 };
 
@@ -68,6 +65,10 @@ pub fn main(init: std.process.Init) !void {
     var cfg = BackendCfg.init(arena);
     parseArgs(args, &cfg, arena);
 
+    if (cfg.addrs.items.len == 0) {
+        try cfg.addrs.append(arena, "127.0.0.1:9000");
+    }
+
     var backends = try std.ArrayList(lb.Backend).initCapacity(arena, cfg.addrs.items.len);
     for (cfg.addrs.items) |addr| {
         backends.appendAssumeCapacity(try lb.Backend.newWithWeight(addr, 10));
@@ -109,6 +110,10 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
     proxy_app.upstreamBytes = &state.metrics.bytes_upstream;
     proxy_app.downstreamBytes = &state.metrics.bytes_downstream;
+    // ponytail: upstream_pool disabled — pool returns dead connections
+    // because we don't detect closed sockets before reuse. Enable when
+    // the pool has a liveness check (SO_KEEPALIVE or send probe).
+    // proxy_app.upstream_pool = &state.upstream_pool;
     proxy_app.cacheLookup = struct {
         fn cb(path: []const u8) ?[]const u8 {
             const s = global_state.?;
@@ -133,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
 
     var svc = Svc.init("zigora_proxy", proxy_app);
-    svc.setShutdown(shutdown);
+    svc.setShutdown(shutdown, &server);
     svc.onAccept = struct {
         fn cb(o: *proxy.HttpProxy(MyProxy)) void {
             o.inner.state.metrics.incAccepted();
@@ -188,9 +193,8 @@ test "defaults preserved when no --backend" {
     const alc = std.testing.allocator;
     var cfg = BackendCfg.init(alc);
     defer cfg.addrs.deinit(alc);
-    const initial_len = cfg.addrs.items.len;
     parseArgs(&.{"zigora"}, &cfg, alc);
-    try std.testing.expect(initial_len >= 2);
+    try std.testing.expectEqual(@as(usize, 0), cfg.addrs.items.len);
 }
 
 test "AppState is a struct" {

@@ -51,6 +51,9 @@ pub fn Session(comptime C: type) type {
         peer: HttpPeer,
         retries: usize = 0,
         ctx: C,
+        /// Total bytes written to the downstream client for this request.
+        /// Used by the cache layer to decide whether to capture the response.
+        cache_total_written: usize = 0,
         // v0.3: downstream_session, cache, compression ctx, modules ctx
     };
 }
@@ -155,13 +158,11 @@ pub fn HttpProxy(comptime T: type) type {
 
         /// Full Pingora lifecycle: parse → filter → framework /metrics|/admin
         /// intercept → retry loop → proxyToH1 → filters → log.
-        pub fn process_new(self: *Self, io: Io, stream: Stream, bufs: *core.PerRequestBuffers) error{ProcessFailed}!?Stream {
-            const read_buf = &bufs.read;
-            const write_buf = &bufs.write;
-            @memset(read_buf, 0);
-            @memset(write_buf, 0);
-            var reader = net.Stream.reader(stream, io, read_buf);
-            var writer = net.Stream.writer(stream, io, write_buf);
+        pub fn process_new(self: *Self, io: Io, stream: Stream) error{ProcessFailed}!?Stream {
+            var read_buf: [4096]u8 = undefined;
+            var write_buf: [4096]u8 = undefined;
+            var reader = net.Stream.reader(stream, io, &read_buf);
+            var writer = net.Stream.writer(stream, io, &write_buf);
 
             const raw = reader.interface.peekGreedy(1) catch |err| switch (err) {
                 error.EndOfStream => return null,
@@ -170,7 +171,7 @@ pub fn HttpProxy(comptime T: type) type {
             if (raw.len == 0) return null;
 
             var ctx = ProxyHttp(T).newCtx(self.inner);
-            const request = http.Request.parse(read_buf.*[0..raw.len]) catch {
+            const request = http.Request.parse(read_buf[0..raw.len]) catch {
                 log.info("proxy: (unparsable request)", .{});
                 return error.ProcessFailed;
             };
@@ -246,10 +247,21 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, bufs, self.upstream_pool, stream, body_hint);
+                // ponytail: small-response cache capture buffer. 16K covers most
+                // HTML/JSON API responses; larger responses bypass the cache.
+                var cache_buf: [16384]u8 = undefined;
+                const result = proxyToH1(io, session.peer.host, session.peer.port, raw, &writer.interface, self.upstreamBytes, self.downstreamBytes, &session, self.upstream_pool, stream, body_hint, if (self.cachePut != null) &cache_buf else null);
                 if (self.onUpstreamDisconnect) |cb| cb(self.inner);
 
                 if (result == .ok) {
+                    // ponytail: cache small responses (< cache_buf.len) keyed by
+                    // request path. Larger responses bypass — full-response
+                    // capture would need arena alloc per request.
+                    if (self.cachePut) |put_fn| {
+                        if (session.cache_total_written < cache_buf.len) {
+                            put_fn(request.path, cache_buf[0..session.cache_total_written]);
+                        }
+                    }
                     break;
                 }
                 if (self.onUpstreamError) |cb| cb(self.inner);
@@ -311,10 +323,10 @@ fn proxyToH1(
     upstream_bytes: ?*std.atomic.Value(usize),
     downstream_bytes: ?*std.atomic.Value(usize),
     session_capture: *Session(Ctx),
-    bufs: *core.PerRequestBuffers,
     upstream_pool: ?*pool.ConnectionPool(Stream),
     client_stream: Stream,
     body_hint: BodyHint,
+    cache_capture: ?[]u8,
 ) DispatchResult {
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
@@ -325,6 +337,23 @@ fn proxyToH1(
     defer {
         if (!pooled) ups.close(io);
     }
+
+    // Helper: write to client + conditionally capture for cache.
+    var cap_len: usize = 0;
+    const writeAndCapture = struct {
+        fn call(w: *Io.Writer, data: []const u8, cap: ?[]u8, clen: *usize, sess: *Session(Ctx)) !void {
+            try w.writeAll(data);
+            sess.cache_total_written += data.len;
+            if (cap) |c| {
+                const room = c.len - clen.*;
+                const n = @min(data.len, room);
+                if (n > 0) {
+                    @memcpy(c[clen.*..][0..n], data[0..n]);
+                    clen.* += n;
+                }
+            }
+        }
+    }.call;
 
 // send request to upstream (headers + optional body)
     if (client_buf.len > 0) {
@@ -376,7 +405,7 @@ fn proxyToH1(
     // read upstream response — peek until we have full headers
     var ups_read_buf: [4096]u8 = undefined;
     var ups_reader = net.Stream.reader(ups, io, &ups_read_buf);
-    const header_buf = &bufs.header;
+    var header_buf: [8192]u8 = undefined;
     var header_len: usize = 0;
 
     // accumulate until we find \r\n\r\n (end of headers)
@@ -391,13 +420,13 @@ fn proxyToH1(
         if (need == 0) return .failed; // headers too large
 
         const n = @min(slice.len, need);
-        @memcpy(header_buf.*[header_len..][0..n], slice[0..n]);
+        @memcpy(header_buf[header_len..][0..n], slice[0..n]);
         header_len += n;
         _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
 
         // check if we have complete headers (\r\n\r\n)
         if (header_len >= 4) {
-            if (std.mem.eql(u8, header_buf.*[header_len - 4..header_len], "\r\n\r\n")) {
+            if (std.mem.eql(u8, header_buf[header_len - 4..header_len], "\r\n\r\n")) {
                 break;
             }
         }
@@ -406,9 +435,9 @@ fn proxyToH1(
     if (header_len == 0) return .failed;
 
     // parse response headers
-    const resp = http.ResponseHeader.parse(header_buf.*[0..header_len]) catch {
+    const resp = http.ResponseHeader.parse(header_buf[0..header_len]) catch {
         // not a valid HTTP response — forward raw and return
-        client_writer.writeAll(header_buf.*[0..header_len]) catch return .failed;
+        writeAndCapture(client_writer, header_buf[0..header_len], cache_capture, &cap_len, session_capture) catch return .failed;
         // stream rest
         while (true) {
             const slice = ups_reader.interface.peekGreedy(1) catch |err| switch (err) {
@@ -416,7 +445,7 @@ fn proxyToH1(
                 else => return .failed,
             };
             if (slice.len == 0) break;
-            client_writer.writeAll(slice) catch return .failed;
+            writeAndCapture(client_writer, slice, cache_capture, &cap_len, session_capture) catch return .failed;
             _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return .failed;
         }
         client_writer.flush() catch return .failed;
@@ -427,7 +456,7 @@ fn proxyToH1(
     session_capture.response = resp;
 
     // write headers to client immediately
-    client_writer.writeAll(header_buf.*[0..resp.body_start]) catch return .failed;
+    writeAndCapture(client_writer, header_buf[0..resp.body_start], cache_capture, &cap_len, session_capture) catch return .failed;
 
     // determine body transfer mode
     const content_length = findHeader(resp.headers, "content-length");
@@ -493,7 +522,7 @@ fn proxyToH1(
                 if (slice.len == 0) break;
 
                 const n = @min(slice.len, chunk_remaining);
-                client_writer.writeAll(slice[0..n]) catch return .failed;
+                writeAndCapture(client_writer, slice[0..n], cache_capture, &cap_len, session_capture) catch return .failed;
                 if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
 
                 chunk_remaining -= n;
@@ -522,7 +551,7 @@ fn proxyToH1(
             if (slice.len == 0) break;
 
             const n = @min(slice.len, body_remaining);
-            client_writer.writeAll(slice[0..n]) catch return .failed;
+            writeAndCapture(client_writer, slice[0..n], cache_capture, &cap_len, session_capture) catch return .failed;
             if (downstream_bytes) |ctr| _ = ctr.fetchAdd(n, .monotonic);
 
             body_remaining -= n;
@@ -537,7 +566,7 @@ fn proxyToH1(
             };
             if (slice.len == 0) break;
 
-            client_writer.writeAll(slice) catch return .failed;
+            writeAndCapture(client_writer, slice, cache_capture, &cap_len, session_capture) catch return .failed;
             if (downstream_bytes) |ctr| _ = ctr.fetchAdd(slice.len, .monotonic);
 
             _ = ups_reader.interface.discard(Io.Limit.limited(slice.len)) catch return .failed;

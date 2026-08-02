@@ -74,9 +74,16 @@ pub const Server = struct {
     services: std.ArrayList(ServiceSlot),
     shutdown_flag: std.atomic.Value(bool) = .{ .raw = false },
     phase_: std.atomic.Value(ExecutionPhase) = .{ .raw = ExecutionPhase.Setup },
+    /// Raw listener socket fds. Closed by shutdown() to unblock accept loops.
+    listener_fds: std.ArrayList(std.posix.socket_t),
 
     pub fn new(allocator: std.mem.Allocator, conf: ServerConf) Server {
-        return .{ .allocator = allocator, .conf = conf, .services = .empty };
+        return .{ .allocator = allocator, .conf = conf, .services = .empty, .listener_fds = .empty };
+    }
+
+    pub fn deinit(self: *Server) void {
+        self.services.deinit(self.allocator);
+        self.listener_fds.deinit(self.allocator);
     }
 
     pub fn addService(
@@ -93,10 +100,19 @@ pub const Server = struct {
         return .{ .flag = &self.shutdown_flag };
     }
 
-    /// Trigger graceful shutdown. Sets the flag, transitions phase.
+    /// Trigger graceful shutdown. Sets the flag, transitions phase, closes
+    /// all listener sockets to unblock accept loops.
     pub fn shutdown(self: *Server) void {
         self.shutdown_flag.store(true, .release);
         _ = self.phase_.swap(ExecutionPhase.ShutdownStarted, .acq_rel);
+        for (self.listener_fds.items) |fd| {
+            _ = std.os.linux.shutdown(fd, std.os.linux.SHUT.RDWR);
+        }
+    }
+
+    /// Register a listener fd so shutdown() can close it.
+    pub fn addListenerFd(self: *Server, fd: std.posix.socket_t) !void {
+        try self.listener_fds.append(self.allocator, fd);
     }
 
     /// Spawn one `io.async` future per service on the `Io` worker pool,
@@ -157,7 +173,7 @@ test "ServerConf defaults to 1 thread" {
 test "Server.new empty has no services" {
     const alc = std.testing.allocator;
     var s = Server.new(alc, .{});
-    defer s.services.deinit(alc);
+    defer s.deinit();
     try std.testing.expectEqual(@as(usize, 0), s.services.items.len);
 }
 
@@ -169,6 +185,7 @@ test "ExecutionPhase enum shape" {
 test "ShutdownWatch reports false then true" {
     const alc = std.testing.allocator;
     var s = Server.new(alc, .{});
+    defer s.deinit();
     const watch = s.shutdownWatch();
     try std.testing.expect(!watch.check());
     s.shutdown();
