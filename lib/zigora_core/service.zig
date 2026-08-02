@@ -136,6 +136,9 @@ pub fn Service(comptime App: type) type {
                     _ = f.await(io);
                 }
             }
+            // Drain: wait for in-flight connections before returning, so
+            // callers can deinit state while no handler is running.
+            self.inflight.await(io) catch {};
             log.info("core: service '{s}' shutting down", .{self.name});
         }
 
