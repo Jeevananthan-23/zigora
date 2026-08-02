@@ -9,12 +9,6 @@ const core = @import("zigora-core");
 const proxy = @import("zigora-proxy");
 const metrics = @import("zigora-metrics");
 
-var global_metrics: ?*metrics.Metrics = null;
-
-fn renderMetrics(w: *Io.Writer) void {
-    if (global_metrics) |m| m.renderPrometheus(w) catch {};
-}
-
 const AppState = struct {
     metrics: metrics.Metrics,
 };
@@ -31,13 +25,16 @@ const MyProxy = struct {
     pub fn upstream_peer(_: *MyProxy, _: *proxy.Ctx) proxy.HttpPeer {
         return .{ .host = "127.0.0.1", .port = 9000 };
     }
+
+    pub fn renderMetrics(self: *MyProxy, w: *Io.Writer) void {
+        self.state.metrics.renderPrometheus(w) catch {};
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
     const process_io = init.io;
     const arena = init.arena.allocator();
-    var m = metrics.Metrics.init(arena);
-    global_metrics = &m;
+    const m = metrics.Metrics.init(arena);
 
     var state = AppState{ .metrics = m };
     var my_proxy = MyProxy{ .state = &state };
@@ -46,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
         .host = "127.0.0.1",
         .port = 9000,
     });
-    proxy_app.renderMetrics = &renderMetrics;
+    proxy_app.renderMetrics = MyProxy.renderMetrics;
     var svc = Svc.init("simple_proxy", proxy_app);
     try svc.addTcp(arena, "127.0.0.1:8080");
     const SlotWrap = struct {

@@ -154,19 +154,19 @@ pub fn HttpProxy(comptime T: type) type {
         upstream_pool: ?*pool.ConnectionPool(Stream) = null,
         /// Framework-level handler: renders Prometheus metrics → writer. Called
         /// for GET /metrics before upstream dispatch.
-        renderMetrics: ?*const fn (*Io.Writer) void = null,
+        renderMetrics: ?*const fn (*T, *Io.Writer) void = null,
         /// Framework-level handler: renders admin HTML → writer. Called for
         /// GET /admin before upstream dispatch.
-        renderAdmin: ?*const fn (*Io.Writer) void = null,
+        renderAdmin: ?*const fn (*T, *Io.Writer) void = null,
 
         /// Cache lookup callback. Called before upstream dispatch; returns
         /// cached response bytes (or null) for the given request path.
-        cacheLookup: ?*const fn (path: []const u8) ?[]const u8 = null,
+        cacheLookup: ?*const fn (*T, path: []const u8) ?[]const u8 = null,
         /// Cache put callback. Called after a successful upstream dispatch with
         /// the request path and the raw upstream response bytes (owned by the
         /// caller's stack buffer; the callback must `dupe` if it needs to keep
         /// them past the request).
-        cachePut: ?*const fn (path: []const u8, resp: []const u8) void = null,
+        cachePut: ?*const fn (*T, path: []const u8, resp: []const u8) void = null,
 
         const Self = @This();
 
@@ -207,8 +207,8 @@ pub fn HttpProxy(comptime T: type) type {
                 if (std.mem.eql(u8, request.path, "/metrics")) {
                     if (self.renderMetrics) |render| {
                         const wptr = &writer.interface;
-                        Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nConnection: close\r\n\r\n") catch {};
-                        render(wptr);
+                        respondHead(wptr, "text/plain; version=0.0.4");
+                        render(self.inner, wptr);
                         Io.Writer.flush(wptr) catch {};
                         stream.close(io);
                         return null;
@@ -216,8 +216,8 @@ pub fn HttpProxy(comptime T: type) type {
                 } else if (std.mem.eql(u8, request.path, "/admin")) {
                     if (self.renderAdmin) |render| {
                         const wptr = &writer.interface;
-                        Io.Writer.writeAll(wptr, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n") catch {};
-                        render(wptr);
+                        respondHead(wptr, "text/html");
+                        render(self.inner, wptr);
                         Io.Writer.flush(wptr) catch {};
                         stream.close(io);
                         return null;
@@ -227,7 +227,7 @@ pub fn HttpProxy(comptime T: type) type {
 
             // ---- cache lookup ----
             if (self.cacheLookup) |lookup| {
-                if (lookup(request.path)) |cached| {
+                if (lookup(self.inner, request.path)) |cached| {
                     const wptr = &writer.interface;
                     Io.Writer.writeAll(wptr, cached) catch {};
                     Io.Writer.flush(wptr) catch {};

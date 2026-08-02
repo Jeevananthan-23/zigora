@@ -7,17 +7,6 @@ const lb = @import("zigora-lb");
 const metrics = @import("zigora-metrics");
 const memcache = @import("zigora-memory-cache");
 
-var global_metrics: ?*metrics.Metrics = null;
-var global_state: ?*AppState = null;
-
-fn renderMetrics(w: *Io.Writer) void {
-    if (global_metrics) |m| m.renderPrometheus(w) catch {};
-}
-
-fn renderAdmin(w: *Io.Writer) void {
-    if (global_metrics) |m| m.renderAdmin(w) catch {};
-}
-
 const BackendCfg = struct {
     addrs: std.ArrayList([]const u8),
 
@@ -55,6 +44,32 @@ const MyProxy = struct {
         log.debug("routing to {s}:{d}", .{ ctx.backend_host, ctx.backend_port });
         return .{ .host = ctx.backend_host, .port = ctx.backend_port };
     }
+
+    pub fn renderMetrics(self: *MyProxy, w: *Io.Writer) void {
+        self.state.metrics.renderPrometheus(w) catch {};
+    }
+
+    pub fn renderAdmin(self: *MyProxy, w: *Io.Writer) void {
+        self.state.metrics.renderAdmin(w) catch {};
+    }
+
+    pub fn cacheLookup(self: *MyProxy, path: []const u8) ?[]const u8 {
+        const result = self.state.response_cache.get(path);
+        if (result.status.isHit()) {
+            self.state.metrics.incCacheHit();
+            return result.value;
+        }
+        self.state.metrics.incCacheMiss();
+        return null;
+    }
+
+    pub fn cachePut(self: *MyProxy, path: []const u8, resp: []const u8) void {
+        // dupe the response bytes into the process arena — the proxy's
+        // stack buffer is freed on return.
+        const owned = self.state.cache_allocator.dupe(u8, resp) catch return;
+        self.state.response_cache.put(path, owned, 60 * std.time.ns_per_s) catch return;
+        self.state.metrics.incCachePut();
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -85,8 +100,6 @@ pub fn main(init: std.process.Init) !void {
         .response_cache = resp_cache,
         .cache_allocator = arena,
     };
-    global_metrics = &state.metrics;
-    global_state = &state;
 
     var server = core.Server.new(arena, .{});
     const shutdown = server.shutdownWatch();
@@ -97,8 +110,8 @@ pub fn main(init: std.process.Init) !void {
         .host = "127.0.0.1",
         .port = 8080,
     });
-    proxy_app.renderMetrics = &renderMetrics;
-    proxy_app.renderAdmin = &renderAdmin;
+    proxy_app.renderMetrics = MyProxy.renderMetrics;
+    proxy_app.renderAdmin = MyProxy.renderAdmin;
     proxy_app.onUpstreamConnect = struct {
         fn cb(p: *MyProxy) void { p.state.metrics.incUpstreamActive(); }
     }.cb;
@@ -114,28 +127,8 @@ pub fn main(init: std.process.Init) !void {
     // because we don't detect closed sockets before reuse. Enable when
     // the pool has a liveness check (SO_KEEPALIVE or send probe).
     // proxy_app.upstream_pool = &state.upstream_pool;
-    proxy_app.cacheLookup = struct {
-        fn cb(path: []const u8) ?[]const u8 {
-            const s = global_state.?;
-            const result = s.response_cache.get(path);
-            if (result.status.isHit()) {
-                s.metrics.incCacheHit();
-                return result.value;
-            }
-            s.metrics.incCacheMiss();
-            return null;
-        }
-    }.cb;
-    proxy_app.cachePut = struct {
-        fn cb(path: []const u8, resp: []const u8) void {
-            const s = global_state.?;
-            // dupe the response bytes into the process arena — the proxy's
-            // stack buffer is freed on return.
-            const owned = s.cache_allocator.dupe(u8, resp) catch return;
-            s.response_cache.put(path, owned, 60 * std.time.ns_per_s) catch return;
-            s.metrics.incCachePut();
-        }
-    }.cb;
+    proxy_app.cacheLookup = MyProxy.cacheLookup;
+    proxy_app.cachePut = MyProxy.cachePut;
 
     var svc = Svc.init("zigora_proxy", proxy_app);
     svc.setShutdown(shutdown, &server);
