@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.0-alpha3 — 2026-08-02
+
+Deep-module refactor of the proxy seam + connection-handling fixes.
+
+### Additions
+
+- **proxy** (`lib/zigora_proxy/root.zig`): `proxyToH1` collapsed from 12 params to 3 — request-scoped knobs (cache buffer/cursor, upstream pool, byte counters, body hint) now ride on `Session`; capture logic is a `Session.writeAndCapture` method. Cache put fires only when the response fit the capture buffer entirely.
+- **proxy**: `renderMetrics`/`renderAdmin`/`cacheLookup`/`cachePut` callbacks take the app pointer (`*T`), matching the `onUpstream*` callbacks — global singletons (`global_state`, `global_metrics`) deleted from `main.zig` and both examples; callbacks are now `MyProxy` methods.
+- **core** (`lib/zigora_core/server.zig`): `Server.addService(&svc)` takes the `Service` directly and generates the start-wrapper internally — the `SlotWrap`/`ServiceSlot` boilerplate is gone from all consumers.
+- **core**: deleted dead `buffer_pool` module (unused since the v0.4 stack-buffer rework; its cursor-based borrow had no acquire/release protocol).
+
+### Fixes
+
+- E2E script: step 7's bare `wait` blocked forever on the daemon jobs; step 8's `pidof` with a path matched nothing so SIGTERM was never sent.
+
+### Verified
+
+- `zig build` + `zig build test` clean; E2E 8/8 PASS (GET, streaming, /metrics, /admin, 5x sequential, POST, 3 parallel, SIGTERM).
+
 ## v0.2.4 — 2026-07-29
 
 End-to-end memory cache round-trip + cachePut callback.
