@@ -64,15 +64,26 @@ pub fn MemoryCache(comptime T: type) type {
 
         store: tinyufo.TinyUfo(N),
         hasher_seed: u64,
+        allocator: std.mem.Allocator,
 
         pub fn init(allocator: std.mem.Allocator, size: usize) !Self {
             return .{
                 .store = try tinyufo.TinyUfo(N).init(allocator, size, size),
                 .hasher_seed = 0, // ponytail: deterministic seed
+                .allocator = allocator,
             };
         }
 
+        /// `put` takes ownership of `value`; this frees one (for slice T).
+        fn freeOwnedValue(allocator: std.mem.Allocator, n: N) void {
+            switch (@typeInfo(T)) {
+                .pointer => |p| if (p.size == .slice) allocator.free(n.value),
+                else => {},
+            }
+        }
+
         pub fn deinit(self: *Self) void {
+            self.store.forEachData(self.allocator, freeOwnedValue);
             self.store.deinit();
         }
 
@@ -122,10 +133,10 @@ pub fn MemoryCache(comptime T: type) type {
             const k = self.hashKey(key);
             const expire = if (ttl_ns) |t| nanoTimestamp() + @as(i128, t) else null;
             const ev = try self.store.put(k, .{ .value = value, .expire_on = expire }, 1);
-            // `ev` is owned by caller; evicted entries are dropped here.
-            // ponytail: evicted nodes just drop. Real cache layer will want
-            // to call back into an eviction manager (v0.2 phase 2.9).
-            if (ev.len > 0) self.store.allocator.free(ev);
+            // Evicted nodes are dropped here; owned values are freed too.
+            // ponytail: no eviction manager callback (v0.2 phase 2.9).
+            for (ev) |n| freeOwnedValue(self.allocator, n.data);
+            self.store.allocator.free(ev);
         }
 
         /// `forcePut` — always admit, skipping TinyLFU check.
@@ -134,7 +145,8 @@ pub fn MemoryCache(comptime T: type) type {
             const k = self.hashKey(key);
             const expire = if (ttl_ns) |t| nanoTimestamp() + @as(i128, t) else null;
             const ev = try self.store.forcePut(k, .{ .value = value, .expire_on = expire }, 1);
-            if (ev.len > 0) self.store.allocator.free(ev);
+            for (ev) |n| freeOwnedValue(self.allocator, n.data);
+            self.store.allocator.free(ev);
         }
 
         /// Remove a key.

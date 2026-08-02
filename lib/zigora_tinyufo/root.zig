@@ -94,6 +94,13 @@ pub fn TinyUfo(comptime T: type) type {
             self.buckets.deinit(self.allocator);
         }
 
+        /// Call `f(ctx, data)` with every resident entry's data, for layers
+        /// that own `T` and must free it at shutdown.
+        pub fn forEachData(self: *Self, ctx: anytype, comptime f: fn (@TypeOf(ctx), T) void) void {
+            var it = self.buckets.iterator();
+            while (it.next()) |e| f(ctx, e.value_ptr.data);
+        }
+
         // ---- TinyLFU frequency estimator (1-row CM sketch, min of 4 hashes) ----
 
         fn lfuIncr(self: *Self, key: Key) u32 {
@@ -183,9 +190,17 @@ pub fn TinyUfo(comptime T: type) type {
                     }
                     b.weight = weight;
                 }
+                // Hand the previous value back with the eviction batch so the
+                // owning layer can free it.
+                const old_data = b.data;
                 b.data = data;
-                // Evict to limit ignoring this key's own weight change.
-                return self.evictToLimit(0);
+                var batch: std.ArrayList(KV(T)) = .empty;
+                defer batch.deinit(self.allocator);
+                batch.append(self.allocator, .{ .key = key, .data = old_data, .weight = old_w }) catch {};
+                const evicted = try self.evictToLimit(0);
+                batch.appendSlice(self.allocator, evicted) catch {};
+                self.allocator.free(evicted);
+                return batch.toOwnedSlice(self.allocator);
             }
 
             // Need to make room. Evict first.
