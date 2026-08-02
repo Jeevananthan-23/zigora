@@ -11,7 +11,9 @@ const Io = std.Io;
 const net = std.Io.net;
 const listeners_mod = @import("listeners.zig");
 const server_mod = @import("server.zig");
+const runtime_mod = @import("runtime.zig");
 const ShutdownWatch = server_mod.ShutdownWatch;
+const NoStealRuntime = runtime_mod.NoStealRuntime;
 const Stream = net.Stream;
 
 pub const zgcore_service = @This();
@@ -83,6 +85,7 @@ pub fn Service(comptime App: type) type {
         server_ref: ?*server_mod.Server = null,
         onAccept: ?*const fn (*App) void = null,
         onFinish: ?*const fn (*App) void = null,
+        runtime: ?*NoStealRuntime = null,
 
         const Self = @This();
 
@@ -93,6 +96,20 @@ pub fn Service(comptime App: type) type {
         pub fn setShutdown(self: *Self, sh: ShutdownWatch, svr: *server_mod.Server) void {
             self.shutdown_watch = sh;
             self.server_ref = svr;
+        }
+
+        /// Assign the NoSteal runtime: accepts stay on engine 0, each
+        /// connection is dispatched to a random engine (never engine 0).
+        pub fn setRuntime(self: *Self, rt: *NoStealRuntime) void {
+            self.runtime = rt;
+        }
+
+        /// The engine a newly accepted connection runs on. With a NoSteal
+        /// runtime each connection is dispatched to a random engine; without
+        /// one, connections run on the accept engine like before.
+        fn connIo(self: *Self, accept_io: Io) Io {
+            if (self.runtime) |rt| return rt.getRandomIo();
+            return accept_io;
         }
 
         pub fn addTcp(self: *Self, allocator: std.mem.Allocator, addr: []const u8) !void {
@@ -151,7 +168,8 @@ pub fn Service(comptime App: type) type {
                         continue;
                     };
                     if (self.onAccept) |cb| cb(&self.app);
-                    self.inflight.concurrent(io, handleConn, .{ self, io, stream }) catch |err| {
+                    const conn_io = self.connIo(io);
+                    self.inflight.concurrent(conn_io, handleConn, .{ self, conn_io, stream }) catch |err| {
                         log.warn("core: dispatch failed: {s}", .{@errorName(err)});
                         stream.close(io);
                     };
@@ -164,7 +182,8 @@ pub fn Service(comptime App: type) type {
                         continue;
                     };
                     if (self.onAccept) |cb| cb(&self.app);
-                    self.inflight.concurrent(io, handleConn, .{ self, io, stream }) catch |err| {
+                    const conn_io = self.connIo(io);
+                    self.inflight.concurrent(conn_io, handleConn, .{ self, conn_io, stream }) catch |err| {
                         log.warn("core: dispatch failed: {s}", .{@errorName(err)});
                         stream.close(io);
                     };

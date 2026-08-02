@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0-alpha6 — 2026-08-02
+
+Pingora-style NoSteal runtime: the shared `Io.Threaded` pool is replaced
+with one engine per CPU, so no run queue is shared between connections.
+Cached-path c100 throughput 53-57K → 62.5-64.6K req/s, median 3-7ms →
+~1.5ms, max tail ~200ms → ~103ms (see BENCHMARK.md Run 5).
+
+### Additions
+
+- **core** (`lib/zigora_core/runtime.zig`): `NoStealRuntime` — N independent
+  `Io.Threaded` engines, each `.unlimited`; engine 0 owns accept loops;
+  `getRandomIo()` dispatches each connection to a random other engine
+  (pingora's `current_handle()`).
+- **core**: `Service.setRuntime()` — connections are dispatched per-engine;
+  without a runtime, services keep the old single-io behavior.
+- **proxy**: `downstream_bytes` counter now counts cache-hit responses (3.6).
+- **main**: wires the NoSteal runtime (n_cpu engines); drops the ad-hoc
+  `async_limit` tweak.
+
+### Notes
+
+- `std.Io.Evented` (io_uring) was probed as the scheduler engine and
+  rejected: it does not compile in Zig 0.16.0 (std bug in `Uring.zig` dir
+  open error sets — `Dir.OpenError` missing `error.ReadOnlyFileSystem`,
+  fixed upstream post-0.16.0; no 0.16.1 exists). Revisit on a Zig upgrade.
+- Determinism gate (roadmap 3.5) passed: 3x runs spread 1.03x (c100) and
+  1.2x (c8), under the 2x gate. Remaining in 3.5: the in-repo bench fixture.
+
 ## v0.4.0-alpha5 — 2026-08-02
 
 Downstream keep-alive: the RST storm is gone; cached-path throughput is now

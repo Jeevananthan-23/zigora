@@ -74,14 +74,6 @@ const MyProxy = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const process_io = init.io;
-    // The runtime's default async limit is n_cpu-1 (7 on 8 cores), which
-    // queues concurrent connection tasks once keep-alive connections
-    // suspend on idle waits. Raise it so 100+ keep-alive conns don't stall.
-    if (process_io.userdata) |ud| {
-        const t: *Io.Threaded = @ptrCast(@alignCast(ud));
-        t.setAsyncLimit(.unlimited);
-    }
     // Debug/ReleaseSafe: leak-checking allocator; ReleaseFast/Small: the
     // lock-free per-CPU smp allocator (see MEMORY_MANAGEMENT.md).
     var debug_alloc: std.heap.DebugAllocator(.{ .stack_trace_frames = 32 }) = .init;
@@ -133,6 +125,13 @@ pub fn main(init: std.process.Init) !void {
     defer server.deinit();
     const shutdown = server.shutdownWatch();
 
+    // Pingora-style NoSteal runtime: one engine per CPU. Engine 0 owns the
+    // accept loop; connections are spread across engines 1..n (see
+    // zigora_core/runtime.zig).
+    const n_cpu: usize = std.Thread.getCpuCount() catch 4;
+    var runtime = try core.NoStealRuntime.init(allocator, n_cpu);
+    defer runtime.deinit();
+
     var my_proxy = MyProxy{ .state = &state };
     const Svc = core.Service(proxy.HttpProxy(MyProxy));
     var proxy_app = proxy.HttpProxy(MyProxy).init(&my_proxy, .{
@@ -142,13 +141,19 @@ pub fn main(init: std.process.Init) !void {
     proxy_app.renderMetrics = MyProxy.renderMetrics;
     proxy_app.renderAdmin = MyProxy.renderAdmin;
     proxy_app.onUpstreamConnect = struct {
-        fn cb(p: *MyProxy) void { p.state.metrics.incUpstreamActive(); }
+        fn cb(p: *MyProxy) void {
+            p.state.metrics.incUpstreamActive();
+        }
     }.cb;
     proxy_app.onUpstreamDisconnect = struct {
-        fn cb(p: *MyProxy) void { p.state.metrics.decUpstreamActive(); }
+        fn cb(p: *MyProxy) void {
+            p.state.metrics.decUpstreamActive();
+        }
     }.cb;
     proxy_app.onUpstreamError = struct {
-        fn cb(p: *MyProxy) void { p.state.metrics.incUpstreamErrors(); }
+        fn cb(p: *MyProxy) void {
+            p.state.metrics.incUpstreamErrors();
+        }
     }.cb;
     proxy_app.upstreamBytes = &state.metrics.bytes_upstream;
     proxy_app.downstreamBytes = &state.metrics.bytes_downstream;
@@ -161,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
 
     var svc = Svc.init("zigora_proxy", proxy_app);
     svc.setShutdown(shutdown, &server);
+    svc.setRuntime(&runtime);
     svc.onAccept = struct {
         fn cb(o: *proxy.HttpProxy(MyProxy)) void {
             o.inner.state.metrics.incAccepted();
@@ -179,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("zigora: listening on 127.0.0.1:8080 with {d} backends", .{backends.items.len});
 
-    try server.runForever(process_io);
+    try server.runForever(runtime.acceptIo());
 }
 
 fn parseArgs(args: []const []const u8, cfg: *BackendCfg, allocator: std.mem.Allocator) void {

@@ -25,3 +25,5 @@ pub const Server = server_mod.Server;
 pub const ServerConf = server_mod.ServerConf;
 pub const ExecutionPhase = server_mod.ExecutionPhase;
 pub const ShutdownWatch = server_mod.ShutdownWatch;
+pub const runtime_mod = @import("runtime.zig");
+pub const NoStealRuntime = runtime_mod.NoStealRuntime;

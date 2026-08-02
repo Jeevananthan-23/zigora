@@ -213,3 +213,27 @@ run queue starves long keep-alive chains: median latency climbs to ~1ms at
 at -c100 is scheduled for a follow-up (evented io backend or an idle-wait
 that doesn't churn the run queue). Shutdown remains clean and leak-free
 (Debug build asserts pass).
+
+## Run 5 — 2026-08-02 (NoSteal runtime, v0.4.0-alpha6)
+
+Fix since Run 4 (see V0.4_ROADMAP 3.1 residual): replaced the single shared
+`Io.Threaded` pool with a Pingora-style NoSteal runtime
+(`zigora_core/runtime.zig`) — one engine per CPU, engine 0 owns the accept
+loop, each connection is dispatched to a random other engine. Each engine
+runs `.unlimited`, so nothing queues behind another connection anymore.
+`std.Io.Evented` (io_uring) was probed as the alternative and rejected: it
+does not compile in Zig 0.16.0 (std bug in `Uring.zig` dir-open error sets,
+fixed upstream post-0.16.0; no 0.16.1 release exists).
+
+Cache-hit path `/`, node upstream, keep-alive, wrk -t4 --release=fast, 10s runs:
+
+| Config | Requests/s | Read errors | Latency (mean/med) | Max |
+|--------|-----------|-------------|--------------------|-----|
+| -c8 (3 runs) | 27.6-33.1K | 0 | ~0.5ms | - |
+| -c100 (3 runs) | 62.5-64.6K | 0-24 (0-0.004%) | 1.47-1.73ms | 103-108ms |
+| -c100 determinism gate | 62.5/63.8/64.6K (1.03x) | - | - | - |
+
+vs Run 4 (-c100): 53-57K → 62.5-64.6K req/s (~12%), median 3-7ms → ~1.5ms,
+max tail ~200ms → ~103ms. Determinism spread 1.03x at c100, 1.2x at c8
+(both within the 3.5 gate of < 2x). Shutdown still clean and leak-free
+(Debug asserts pass, SIGTERM exits, services drain).

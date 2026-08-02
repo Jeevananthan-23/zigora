@@ -261,6 +261,7 @@ pub fn HttpProxy(comptime T: type) type {
                     if (lookup(self.inner, request.path)) |cached| {
                         const wptr = &writer.interface;
                         Io.Writer.writeAll(wptr, cached) catch {};
+                        if (self.downstreamBytes) |ctr| _ = ctr.fetchAdd(cached.len, .monotonic);
                         Io.Writer.flush(wptr) catch {};
                         continue;
                     }
