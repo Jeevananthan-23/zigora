@@ -19,6 +19,51 @@ Deep-module refactor of the proxy seam + connection-handling fixes.
 
 - `zig build` + `zig build test` clean; E2E 8/8 PASS (GET, streaming, /metrics, /admin, 5x sequential, POST, 3 parallel, SIGTERM).
 
+## v0.4.0-alpha — 2026-07-31
+
+v0.4 line opens: graceful shutdown, upstream keepalive plumbing, multi-listener accept, request body streaming.
+
+### Additions
+
+- **core** (`lib/zigora_core/server.zig`): SIGTERM/SIGINT signal handlers + `ShutdownWatch`-polled accept loops — clean service shutdown instead of process kill.
+- **core** (`lib/zigora_core/service.zig`): multi-listener parallel accept — N listeners spawn N `io.async` accept futures joined at shutdown (previously one sequential loop).
+- **core/lb**: Consistent-hash LB fix in `load_balancer` example (two-backend distribution).
+- **proxy** (`lib/zigora_proxy/root.zig`): request body streaming for Content-Length POSTs — body forwarded upstream chunk-by-chunk after headers; `BodyHint` mode on the dispatch path.
+- **proxy**: `ConnectionPool` keepalive hook — pooled upstream connections returned when the response allows reuse.
+- **proxy/core**: downstream keepalive disabled for stability (per-request stack buffers, `stream.close` after each response).
+- **docs**: `V0.4_ROADMAP.md` — phased v0.4 plan (perf, TLS, HTTP/2, cache/compress, pools).
+
+### Verified
+
+- SIGTERM shuts all services down cleanly; POST with Content-Length reaches upstream.
+
+## v0.4.0-alpha2 — 2026-07-30
+
+Per-request buffer pool + buffer ownership rework.
+
+### Additions
+
+- **core** (`lib/zigora_core/buffer_pool.zig`): pre-allocated ring of `PerRequestBuffers` (16 slots × 16KB) with atomic round-robin borrow — replaces stack allocation of ~24KB per request.
+- **core/proxy**: `Service.handleConn` borrows pool buffers per connection; `process_new` uses pooled read/write/header buffers instead of stack locals.
+
+## v0.4.0-alpha1 — 2026-07-30
+
+Upstream response streaming: parse-then-stream.
+
+### Additions
+
+- **proxy** (`lib/zigora_proxy/root.zig`): `proxyToH1` rewritten from full-buffer copy to parse-then-stream — response headers parsed into `ResponseHeader`, then body streamed chunk-by-chunk (Content-Length, chunked transfer-encoding, and read-until-EOF modes) with no full-buffer copy. ~200 lines of streaming logic.
+
+## v0.3.0-beta1 — 2026-07-30
+
+First beta: performance tooling + log hygiene.
+
+### Additions
+
+- **bench** (`benches/`): ported Pingora benchmarks — TinyUFO admission (`tinyufo_perf.zig`), LRU (`lru_bench.zig`), Ketama continuum (`ketama_bench.zig`), rate limiter (`limits_bench.zig`); `zig build bench-*` steps in `build.zig`.
+- **perf**: per-request info logs demoted to debug (`main.zig` routing, `zigora_proxy` request completion, `zigora_core` service listening) — keeps error/warn intact, silences hot-path log noise.
+- **docs**: `V0.3_PERFORMANCE.md` — v0.3 performance work plan.
+
 ## v0.2.4 — 2026-07-29
 
 End-to-end memory cache round-trip + cachePut callback.
