@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.0-alpha5 — 2026-08-02
+
+Downstream keep-alive: the RST storm is gone; cached-path throughput is now
+53-57K req/s at wrk -c100 vs ~0 before (see BENCHMARK.md Run 4).
+
+### Additions
+
+- **proxy** (`lib/zigora_proxy/root.zig`): keep-alive request loop in
+  `process_new` — pipelined bytes from the stream reader, else a bounded
+  (50ms) `receiveTimeout` wait into a scratch buffer served via
+  `Io.Reader.fixed`; idle connections close gracefully through the existing
+  drain path (no RST). `src/main.zig` raises the runtime io `async_limit`
+  from n_cpu-1 to `.unlimited` so >7 keep-alive connections don't queue.
+
+### Fixes
+
+- **proxy**: upstream header accumulation over-consumed the peeked buffer —
+  a fast HTTP/1.1 upstream sending headers+body in one read had its body
+  swallowed into `header_buf` and discarded, producing header-only
+  responses (the "0 req/s vs node" benchmark regression). Header
+  consumption now stops at the `\r\n\r\n` terminator; body bytes stay in
+  the reader.
+- **proxy**: unparsable request heads (partial reads on the keep-alive
+  path) now close gracefully instead of `ProcessFailed` (RST churn).
+
 ## v0.4.0-alpha4 — 2026-08-02
 
 Memory management: production leak detection + the real leaks it found.

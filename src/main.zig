@@ -75,6 +75,13 @@ const MyProxy = struct {
 
 pub fn main(init: std.process.Init) !void {
     const process_io = init.io;
+    // The runtime's default async limit is n_cpu-1 (7 on 8 cores), which
+    // queues concurrent connection tasks once keep-alive connections
+    // suspend on idle waits. Raise it so 100+ keep-alive conns don't stall.
+    if (process_io.userdata) |ud| {
+        const t: *Io.Threaded = @ptrCast(@alignCast(ud));
+        t.setAsyncLimit(.unlimited);
+    }
     // Debug/ReleaseSafe: leak-checking allocator; ReleaseFast/Small: the
     // lock-free per-CPU smp allocator (see MEMORY_MANAGEMENT.md).
     var debug_alloc: std.heap.DebugAllocator(.{ .stack_trace_frames = 32 }) = .init;

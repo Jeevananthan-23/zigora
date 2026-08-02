@@ -190,53 +190,83 @@ pub fn HttpProxy(comptime T: type) type {
             var reader = net.Stream.reader(stream, io, &read_buf);
             var writer = net.Stream.writer(stream, io, &write_buf);
 
-            const raw = reader.interface.peekGreedy(1) catch |err| switch (err) {
-                error.EndOfStream => return null,
-                else => return error.ProcessFailed,
-            };
-            if (raw.len == 0) return null;
-
-            var ctx = ProxyHttp(T).newCtx(self.inner);
-            const request = http.Request.parse(read_buf[0..raw.len]) catch {
-                log.info("proxy: (unparsable request)", .{});
-                return error.ProcessFailed;
-            };
-
-            // ---- framework /metrics and /admin intercept ----
-            if (request.method == .GET) {
-                if (std.mem.eql(u8, request.path, "/metrics")) {
-                    if (self.renderMetrics) |render| {
-                        const wptr = &writer.interface;
-                        respondHead(wptr, "text/plain; version=0.0.4");
-                        render(self.inner, wptr);
-                        Io.Writer.flush(wptr) catch {};
-                        stream.close(io);
+            // keep-alive loop: serve one request per iteration. The next
+            // request head comes from pipelined bytes in the stream reader,
+            // else from a bounded receiveTimeout wait so idle connections
+            // close instead of suspending their task forever.
+            var first: bool = true;
+            var scratch: [4096]u8 = undefined;
+            var fixed_reader: ?Io.Reader = null;
+            while (true) {
+                // pipelined bytes in the stream reader win over a previous
+                // fixed reader (which may hold a stale, exhausted head)
+                if (fixed_reader != null and Io.Reader.bufferedLen(&reader.interface) > 0) fixed_reader = null;
+                if (!first and fixed_reader == null) {
+                    const m = stream.socket.receiveTimeout(io, &scratch, .{ .duration = .{
+                        .clock = .real,
+                        .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms },
+                    } }) catch {
+                        closeAfterResponse(&stream, io);
+                        return null;
+                    };
+                    if (m.data.len == 0) {
+                        closeAfterResponse(&stream, io);
                         return null;
                     }
-                } else if (std.mem.eql(u8, request.path, "/admin")) {
-                    if (self.renderAdmin) |render| {
-                        const wptr = &writer.interface;
-                        respondHead(wptr, "text/html");
-                        render(self.inner, wptr);
-                        Io.Writer.flush(wptr) catch {};
-                        stream.close(io);
-                        return null;
-                    }
+                    fixed_reader = Io.Reader.fixed(scratch[0..m.data.len]);
                 }
-            }
+                first = false;
 
-            // ---- cache lookup ----
-            if (self.cacheLookup) |lookup| {
-                if (lookup(self.inner, request.path)) |cached| {
-                    const wptr = &writer.interface;
-                    Io.Writer.writeAll(wptr, cached) catch {};
-                    Io.Writer.flush(wptr) catch {};
-                    stream.close(io);
+                const from_fixed = fixed_reader != null;
+                const r: *Io.Reader = if (fixed_reader) |*fr| fr else &reader.interface;
+                const raw = r.peekGreedy(1) catch |err| switch (err) {
+                    error.EndOfStream => return null,
+                    else => return error.ProcessFailed,
+                };
+                if (raw.len == 0) return null;
+                if (from_fixed) fixed_reader = null; // single-use: refresh next iteration
+
+                var ctx = ProxyHttp(T).newCtx(self.inner);
+                const request = http.Request.parse(raw) catch {
+                    log.info("proxy: (unparsable request)", .{});
+                    closeAfterResponse(&stream, io);
                     return null;
-                }
-            }
+                };
 
-            const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
+                // ---- framework /metrics and /admin intercept ----
+                if (request.method == .GET) {
+                    if (std.mem.eql(u8, request.path, "/metrics")) {
+                        if (self.renderMetrics) |render| {
+                            const wptr = &writer.interface;
+                            respondHead(wptr, "text/plain; version=0.0.4");
+                            render(self.inner, wptr);
+                            Io.Writer.flush(wptr) catch {};
+                            closeAfterResponse(&stream, io);
+                            return null;
+                        }
+                    } else if (std.mem.eql(u8, request.path, "/admin")) {
+                        if (self.renderAdmin) |render| {
+                            const wptr = &writer.interface;
+                            respondHead(wptr, "text/html");
+                            render(self.inner, wptr);
+                            Io.Writer.flush(wptr) catch {};
+                            closeAfterResponse(&stream, io);
+                            return null;
+                        }
+                    }
+                }
+
+                // ---- cache lookup ----
+                if (self.cacheLookup) |lookup| {
+                    if (lookup(self.inner, request.path)) |cached| {
+                        const wptr = &writer.interface;
+                        Io.Writer.writeAll(wptr, cached) catch {};
+                        Io.Writer.flush(wptr) catch {};
+                        continue;
+                    }
+                }
+
+                const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
             // ponytail: small-response cache capture buffer. 16K covers most
             // HTML/JSON API responses; larger responses bypass the cache.
             var cache_buf: [16384]u8 = undefined;
@@ -323,11 +353,10 @@ pub fn HttpProxy(comptime T: type) type {
                 log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
             }
 
-            // ponytail: always close after response until peekGreedy handles
-            // keepalive-closed connections without blocking. Re-enable
-            // keepalive when the reader can detect TCP RST/FIN.
-            stream.close(io);
-            return null;
+            // keep-alive: loop back for the next request on this connection.
+            // The upstream response's Connection header governs reuse; an
+            // idle or closed client trips the bounded wait and closes.
+            }
         }
 
         pub fn cleanup(_: *Self, _: Io) void {}
@@ -349,6 +378,24 @@ fn respondHead(w: *Io.Writer, content_type: []const u8) void {
     Io.Writer.writeAll(w, "HTTP/1.1 200 OK\r\nContent-Type: ") catch return;
     Io.Writer.writeAll(w, content_type) catch return;
     Io.Writer.writeAll(w, "\r\nConnection: close\r\n\r\n") catch return;
+}
+
+/// Close-after-response without RST: send FIN, then discard any bytes the
+/// client already pipelined, so close() doesn't RST the connection and
+/// destroy the response just written. Bounded by a short timeout per read.
+/// ponytail: discard-only drain; a real keepalive path processes the
+/// pipelined request instead (V0.4_ROADMAP 3.1).
+fn closeAfterResponse(stream: *const net.Stream, io: Io) void {
+    stream.shutdown(io, .send) catch {};
+    var scratch: [256]u8 = undefined;
+    while (true) {
+        const m = stream.socket.receiveTimeout(io, &scratch, .{ .duration = .{
+            .clock = .real,
+            .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms },
+        } }) catch break;
+        if (m.data.len == 0) break;
+    }
+    stream.close(io);
 }
 
 // ---- proxyToH1: upstream dispatch + streaming response ----
@@ -442,10 +489,17 @@ fn proxyToH1(
         };
         if (slice.len == 0) break;
 
+        // stop consuming at the header terminator so body bytes that arrived
+        // in the same read stay in the reader for the body loop below
+        var take = slice.len;
+        if (std.mem.indexOf(u8, slice, "\r\n\r\n")) |end| {
+            take = end + 4;
+        }
+
         const need = header_buf.len - header_len;
         if (need == 0) return .failed; // headers too large
 
-        const n = @min(slice.len, need);
+        const n = @min(take, need);
         @memcpy(header_buf[header_len..][0..n], slice[0..n]);
         header_len += n;
         _ = ups_reader.interface.discard(Io.Limit.limited(n)) catch return .failed;
@@ -456,6 +510,7 @@ fn proxyToH1(
                 break;
             }
         }
+        if (take < slice.len) break; // terminator found; body stays in reader
     }
 
     if (header_len == 0) return .failed;
