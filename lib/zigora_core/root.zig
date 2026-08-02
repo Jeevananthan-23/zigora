@@ -25,6 +25,3 @@ pub const Server = server_mod.Server;
 pub const ServerConf = server_mod.ServerConf;
 pub const ExecutionPhase = server_mod.ExecutionPhase;
 pub const ShutdownWatch = server_mod.ShutdownWatch;
-pub const buffer_pool = @import("buffer_pool.zig");
-pub const BufferPool = buffer_pool.BufferPool;
-pub const PerRequestBuffers = buffer_pool.PerRequestBuffers;
