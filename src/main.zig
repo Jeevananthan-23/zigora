@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.zigora);
 const Io = std.Io;
 const core = @import("zigora-core");
@@ -74,34 +75,55 @@ const MyProxy = struct {
 
 pub fn main(init: std.process.Init) !void {
     const process_io = init.io;
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    const args = try init.minimal.args.toSlice(arena);
-    var cfg = BackendCfg.init(arena);
-    parseArgs(args, &cfg, arena);
-
-    if (cfg.addrs.items.len == 0) {
-        try cfg.addrs.append(arena, "127.0.0.1:9000");
+    // Debug/ReleaseSafe: leak-checking allocator; ReleaseFast/Small: the
+    // lock-free per-CPU smp allocator (see MEMORY_MANAGEMENT.md).
+    var debug_alloc: std.heap.DebugAllocator(.{ .stack_trace_frames = 32 }) = .init;
+    const allocator: std.mem.Allocator = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => debug_alloc.allocator(),
+        else => std.heap.smp_allocator,
+    };
+    defer {
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)
+            std.debug.assert(debug_alloc.deinit() == .ok);
     }
 
-    var backends = try std.ArrayList(lb.Backend).initCapacity(arena, cfg.addrs.items.len);
+    // Process args live on the init arena — they outlive everything.
+    const arena: std.mem.Allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+
+    var cfg = BackendCfg.init(allocator);
+    parseArgs(args, &cfg, allocator);
+
+    if (cfg.addrs.items.len == 0) {
+        try cfg.addrs.append(allocator, "127.0.0.1:9000");
+    }
+    defer cfg.addrs.deinit(allocator);
+
+    var backends = try std.ArrayList(lb.Backend).initCapacity(allocator, cfg.addrs.items.len);
+    defer backends.deinit(allocator);
     for (cfg.addrs.items) |addr| {
         backends.appendAssumeCapacity(try lb.Backend.newWithWeight(addr, 10));
     }
     log.info("zigora: listening on 127.0.0.1:8080, {d} backends", .{backends.items.len});
 
-    const balancer = try lb.LoadBalancer(lb.Consistent).init(arena, backends.items);
-    const m = metrics.Metrics.init(arena);
-    const resp_cache = try memcache.MemoryCache([]const u8).init(arena, 256);
+    var balancer = try lb.LoadBalancer(lb.Consistent).init(allocator, backends.items);
+    defer balancer.deinit();
+    var m = metrics.Metrics.init(allocator);
+    defer m.deinit();
+    const resp_cache = try memcache.MemoryCache([]const u8).init(allocator, 256);
 
     var state = AppState{
         .balancer = balancer,
         .metrics = m,
         .response_cache = resp_cache,
-        .cache_allocator = arena,
+        .cache_allocator = allocator,
     };
+    // Deinit the copy AppState holds — the proxy mutates it, so the local
+    // copy's arraylist pointers go stale after the first put.
+    defer state.response_cache.deinit();
 
-    var server = core.Server.new(arena, .{});
+    var server = core.Server.new(allocator, .{});
+    defer server.deinit();
     const shutdown = server.shutdownWatch();
 
     var my_proxy = MyProxy{ .state = &state };
@@ -143,7 +165,8 @@ pub fn main(init: std.process.Init) !void {
             o.inner.state.metrics.decActive();
         }
     }.cb;
-    try svc.addTcp(arena, "127.0.0.1:8080");
+    try svc.addTcp(allocator, "127.0.0.1:8080");
+    defer svc.listeners.deinit(allocator);
 
     _ = try server.addService(&svc);
 

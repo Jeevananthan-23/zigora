@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.0-alpha4 — 2026-08-02
+
+Memory management: production leak detection + the real leaks it found.
+
+### Additions
+
+- **docs**: new `MEMORY_MANAGEMENT.md` — Zig 0.16 allocator model and zoo, idioms (`defer`/`errdefer`, `deinit() == .ok`), zigora's strategy, and conventions for new modules.
+- **main** (`src/main.zig`): mode-switched allocator — `DebugAllocator` (leak-checking) in Debug/ReleaseSafe, `smp_allocator` in ReleaseFast/Small; `deinit() == .ok` asserted at shutdown, so a SIGTERM that reports leaks exits non-zero. All zigora allocations moved off the process arena (kept only for args); shutdown deinit wired for balancer, cache, metrics, listeners, server, config.
+- **tinyufo**: new `forEachData` so owning layers can free resident values; same-key overwrites now return the previous value with the eviction batch instead of orphaning it.
+
+### Fixes
+
+- **memory_cache**: values are freed on eviction, overwrite, and at deinit (previously only the node slice was freed — every eviction leaked a response's bytes); deinit now frees the instance the proxy actually mutated (AppState's copy), not the stale local copy whose arraylist pointers went stale after the first put.
+- **core** (`lib/zigora_core/service.zig`): `startService` drains in-flight connections (`Group.await`) before returning, so `runForever` never unwinds state while a handler is still running.
+
+### Verified
+
+- `zig build` + `zig build test` clean; leak-checked SIGTERM exits clean under a 60-request load during shutdown (3/3 runs, exit 0); E2E 8/8 PASS; ReleaseFast (`smp_allocator`) smoke: 200s + clean exit.
+
 ## v0.4.0-alpha3 — 2026-08-02
 
 Deep-module refactor of the proxy seam + connection-handling fixes.
