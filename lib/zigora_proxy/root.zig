@@ -309,25 +309,34 @@ pub fn http_proxy_service(
     return core.service_mod.Service(HttpProxy(T)).init(name, HttpProxy(T).init(impl, backend));
 }
 
+/// Write the head of a canned 200 response (status line + content-type +
+/// Connection: close). The caller renders the body, flushes, and closes.
+fn respondHead(w: *Io.Writer, content_type: []const u8) void {
+    Io.Writer.writeAll(w, "HTTP/1.1 200 OK\r\nContent-Type: ") catch return;
+    Io.Writer.writeAll(w, content_type) catch return;
+    Io.Writer.writeAll(w, "\r\nConnection: close\r\n\r\n") catch return;
+}
+
 // ---- proxyToH1: upstream dispatch + streaming response ----
 
 /// Connect to upstream, write raw request bytes, stream response back to
 /// client. Parses headers first, then streams body chunks directly
 /// (no full-buffer copy). Handles Content-Length and chunked encoding.
+/// All request-scoped knobs (peer, pool, counters, cache capture, body
+/// mode) ride on the `Session`; callers only pass the writer + raw bytes.
 fn proxyToH1(
-    io: Io,
-    host: []const u8,
-    port: u16,
-    client_buf: []const u8,
+    session: *Session(Ctx),
     client_writer: *Io.Writer,
-    upstream_bytes: ?*std.atomic.Value(usize),
-    downstream_bytes: ?*std.atomic.Value(usize),
-    session_capture: *Session(Ctx),
-    upstream_pool: ?*pool.ConnectionPool(Stream),
-    client_stream: Stream,
-    body_hint: BodyHint,
-    cache_capture: ?[]u8,
+    client_buf: []const u8,
 ) DispatchResult {
+    const io = session.io;
+    const host = session.peer.host;
+    const port = session.peer.port;
+    const body_hint = session.body_hint;
+    const upstream_pool = session.upstream_pool;
+    const upstream_bytes = session.upstream_bytes;
+    const downstream_bytes = session.downstream_bytes;
+
     const ip4 = net.Ip4Address.parse(host, port) catch return .failed;
     const addr: net.IpAddress = .{ .ip4 = ip4 };
     const pool_key = ip4AddrKey(ip4);
