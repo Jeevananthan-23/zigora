@@ -23,7 +23,7 @@ echo -n "3. /metrics ..... "; curl -s "$B/metrics" | grep -q zigora && echo "PAS
 echo -n "4. /admin .......... "; curl -s "$B/admin" | grep -qi admin && echo "PASS" || echo "FAIL"
 echo -n "5. 5x sequential.. "; ok=true; for i in 1 2 3 4 5; do [ "$(curl -s -o /dev/null -w "%{http_code}" "$B/")" = "200" ] || ok=false; done; $ok && echo "PASS" || echo "FAIL"
 echo -n "6. POST (nocrace) .. "; echo -n "" | curl -s -m 2 -X POST -o /dev/null "$B/" 2>/dev/null; sleep 0.3; pgrep -x zigora >/dev/null && echo "PASS" || echo "FAIL"
-echo -n "7. 3 parallel ....... "; curl -s -o /dev/null "$B/" & curl -s -o /dev/null "$B/" & curl -s -o /dev/null "$B/" & wait; echo "PASS"
-echo -n "8. SIGTERM ........ "; kill -TERM $(pidof zig-out/bin/zigora) 2>/dev/null; sleep 2; pgrep -x zigora >/dev/null && echo "FAIL (still alive)" || echo "PASS"
+echo -n "7. 3 parallel ....... "; curl -s -o /dev/null "$B/" & P1=$!; curl -s -o /dev/null "$B/" & P2=$!; curl -s -o /dev/null "$B/" & P3=$!; wait $P1 $P2 $P3; echo "PASS"
+echo -n "8. SIGTERM ........ "; kill -TERM $(pidof zigora) 2>/dev/null; sleep 2; pgrep -x zigora >/dev/null && echo "FAIL (still alive)" || echo "PASS"
 
 echo "=== Done ==="
