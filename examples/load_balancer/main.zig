@@ -86,17 +86,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }.cb;
     try svc.addTcp(arena, "127.0.0.1:8081");
-    const SlotWrap = struct {
-        fn start(ud: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
-            const real: *Svc = @ptrCast(@alignCast(ud));
-            try real.startService(io, alc);
-        }
-    };
     var server = core.Server.new(arena, .{});
-    _ = try server.addService(.{
-        .name = svc.name,
-        .start = SlotWrap.start,
-        .userdata = &svc,
-    });
+    _ = try server.addService(&svc);
     try server.runForever(process_io);
 }

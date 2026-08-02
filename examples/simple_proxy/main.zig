@@ -46,18 +46,8 @@ pub fn main(init: std.process.Init) !void {
     proxy_app.renderMetrics = MyProxy.renderMetrics;
     var svc = Svc.init("simple_proxy", proxy_app);
     try svc.addTcp(arena, "127.0.0.1:8080");
-    const SlotWrap = struct {
-        fn start(ud: *anyopaque, io: std.Io, alc: std.mem.Allocator) anyerror!void {
-            const real: *Svc = @ptrCast(@alignCast(ud));
-            try real.startService(io, alc);
-        }
-    };
     var server = core.Server.new(arena, .{});
-    _ = try server.addService(.{
-        .name = svc.name,
-        .start = SlotWrap.start,
-        .userdata = &svc,
-    });
+    _ = try server.addService(&svc);
     state.metrics.incAccepted();
     try server.runForever(process_io);
 }

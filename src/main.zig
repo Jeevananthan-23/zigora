@@ -145,17 +145,7 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
     try svc.addTcp(arena, "127.0.0.1:8080");
 
-    const SlotWrap = struct {
-        fn start(ud: *anyopaque, io: Io, alc: std.mem.Allocator) anyerror!void {
-            const real: *Svc = @ptrCast(@alignCast(ud));
-            try real.startService(io, alc);
-        }
-    };
-    _ = try server.addService(.{
-        .name = svc.name,
-        .start = SlotWrap.start,
-        .userdata = &svc,
-    });
+    _ = try server.addService(&svc);
 
     log.info("zigora: listening on 127.0.0.1:8080 with {d} backends", .{backends.items.len});
 

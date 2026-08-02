@@ -721,16 +721,11 @@ test "integration: ProxyHttpVTable all null callbacks — compatible with init" 
 test "integration: http_proxy_service builds a Service handle recognized by core.Server" {
     const alc = std.testing.allocator;
     var impl = TestImpl{};
-    const svc = http_proxy_service(TestImpl, "int_svc", &impl, .{ .host = "x", .port = 1 });
+    var svc = http_proxy_service(TestImpl, "int_svc", &impl, .{ .host = "x", .port = 1 });
     try std.testing.expectEqualStrings("int_svc", svc.name);
     var srv = core.Server.new(alc, .{});
     defer srv.services.deinit(alc);
-    const SlotWrap = struct {
-        fn start(ptr: *anyopaque, _: Io, _: std.mem.Allocator) anyerror!void {
-            _ = ptr;
-        }
-    };
-    const handle = try srv.addService(.{ .name = svc.name, .start = SlotWrap.start, .userdata = @ptrCast(&svc) });
+    const handle = try srv.addService(&svc);
     try std.testing.expectEqualStrings("int_svc", handle.name);
     try std.testing.expectEqual(@as(usize, 0), handle.index);
 }

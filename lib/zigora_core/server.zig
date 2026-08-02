@@ -86,13 +86,24 @@ pub const Server = struct {
         self.listener_fds.deinit(self.allocator);
     }
 
-    pub fn addService(
-        self: *Server,
-        slot: ServiceSlot,
-    ) !service_mod.ServiceHandle {
+    /// Register a `Service(App)`; the server generates the start-wrapper
+    /// internally so callers never touch `ServiceSlot`/`*anyopaque`.
+    /// The service must outlive `runForever`.
+    pub fn addService(self: *Server, svc: anytype) !service_mod.ServiceHandle {
+        const App = std.meta.Child(@TypeOf(svc));
+        const Slot = struct {
+            fn start(ud: *anyopaque, io: Io, alc: std.mem.Allocator) anyerror!void {
+                const real: *App = @ptrCast(@alignCast(ud));
+                try real.startService(io, alc);
+            }
+        };
         const idx = self.services.items.len;
-        try self.services.append(self.allocator, slot);
-        return .{ .name = slot.name, .index = idx };
+        try self.services.append(self.allocator, .{
+            .name = svc.name,
+            .start = Slot.start,
+            .userdata = svc,
+        });
+        return .{ .name = svc.name, .index = idx };
     }
 
     /// Get a `ShutdownWatch` for the accept loop to poll.
