@@ -10,6 +10,33 @@ zig build run -- --backend 127.0.0.1:9000
 zig build test          # unit tests (both modules in parallel)
 ```
 
+## Use as a library
+
+Fetch the package and import the `zigora` module:
+
+```bash
+zig fetch --save https://github.com/Jeevananthan-23/zigora/archive/refs/tags/v0.4.0-alpha8.tar.gz
+```
+
+Then in your `build.zig`:
+
+```zig
+const dep = b.dependency("zigora", .{});
+const zigora_mod = dep.module("zigora");
+
+const exe = b.addExecutable(.{
+    .name = "my-proxy",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigora", .module = zigora_mod }},
+    }),
+});
+```
+
+And in code: `const zigora = @import("zigora"); const core = zigora.core;`.
+
 ## Documentation
 
 All docs live in [`docs/`](docs/):

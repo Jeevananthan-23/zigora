@@ -74,8 +74,9 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "README.md",
+        "LICENSE",
         // For example...
-        //"LICENSE",
         //"docs/README.md",
     },
 }
