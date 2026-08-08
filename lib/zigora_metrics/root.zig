@@ -29,6 +29,8 @@ pub const Metrics = struct {
     cache_misses: std.atomic.Value(usize) = .{ .raw = 0 },
     cache_expired: std.atomic.Value(usize) = .{ .raw = 0 },
     cache_puts: std.atomic.Value(usize) = .{ .raw = 0 },
+    pool_reuse: std.atomic.Value(usize) = .{ .raw = 0 },
+    pool_stale: std.atomic.Value(usize) = .{ .raw = 0 },
 
     pub fn init(allocator: std.mem.Allocator) Metrics {
         return .{ .allocator = allocator };
@@ -94,6 +96,14 @@ pub const Metrics = struct {
         _ = self.cache_puts.fetchAdd(1, .monotonic);
     }
 
+    pub fn incPoolReuse(self: *Metrics) void {
+        _ = self.pool_reuse.fetchAdd(1, .monotonic);
+    }
+
+    pub fn incPoolStale(self: *Metrics) void {
+        _ = self.pool_stale.fetchAdd(1, .monotonic);
+    }
+
     /// Render Prometheus text format into `writer`.
     pub fn renderPrometheus(self: *Metrics, writer: anytype) !void {
         try writer.print("# HELP zigora_connections_accepted Total connections accepted\n", .{});
@@ -143,6 +153,14 @@ pub const Metrics = struct {
         try writer.print("# HELP zigora_cache_puts Total cache insertions\n", .{});
         try writer.print("# TYPE zigora_cache_puts counter\n", .{});
         try writer.print("zigora_cache_puts {}\n", .{self.cache_puts.load(.monotonic)});
+
+        try writer.print("# HELP zigora_pool_reuse Idle connections reused from the pool\n", .{});
+        try writer.print("# TYPE zigora_pool_reuse counter\n", .{});
+        try writer.print("zigora_pool_reuse {}\n", .{self.pool_reuse.load(.monotonic)});
+
+        try writer.print("# HELP zigora_pool_stale Idle connections dropped as dead/stale\n", .{});
+        try writer.print("# TYPE zigora_pool_stale counter\n", .{});
+        try writer.print("zigora_pool_stale {}\n", .{self.pool_stale.load(.monotonic)});
     }
 
     /// Simple HTML admin page.
@@ -167,6 +185,8 @@ pub const Metrics = struct {
             \\<tr><td>Cache Misses</td><td>{}</td></tr>
             \\<tr><td>Cache Expired</td><td>{}</td></tr>
             \\<tr><td>Cache Puts</td><td>{}</td></tr>
+            \\<tr><td>Pool Reuses</td><td>{}</td></tr>
+            \\<tr><td>Pool Stale Drops</td><td>{}</td></tr>
             \\</table>
             \\<p><a href="/metrics">Prometheus /metrics</a></p>
             \\</body></html>
@@ -184,6 +204,8 @@ pub const Metrics = struct {
                 self.cache_misses.load(.monotonic),
                 self.cache_expired.load(.monotonic),
                 self.cache_puts.load(.monotonic),
+                self.pool_reuse.load(.monotonic),
+                self.pool_stale.load(.monotonic),
             },
         );
     }

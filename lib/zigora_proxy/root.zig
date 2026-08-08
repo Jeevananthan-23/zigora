@@ -268,95 +268,95 @@ pub fn HttpProxy(comptime T: type) type {
                 }
 
                 const peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
-            // ponytail: small-response cache capture buffer. 16K covers most
-            // HTML/JSON API responses; larger responses bypass the cache.
-            var cache_buf: [16384]u8 = undefined;
-            var session = Session(Ctx){
-                .io = io,
-                .stream = stream,
-                .request = request,
-                .peer = peer,
-                .ctx = ctx,
-                .upstream_pool = self.upstream_pool,
-                .upstream_bytes = self.upstreamBytes,
-                .downstream_bytes = self.downstreamBytes,
-                .cache_buf = if (self.cachePut != null) &cache_buf else null,
-            };
+                // ponytail: small-response cache capture buffer. 16K covers most
+                // HTML/JSON API responses; larger responses bypass the cache.
+                var cache_buf: [16384]u8 = undefined;
+                var session = Session(Ctx){
+                    .io = io,
+                    .stream = stream,
+                    .request = request,
+                    .peer = peer,
+                    .ctx = ctx,
+                    .upstream_pool = self.upstream_pool,
+                    .upstream_bytes = self.upstreamBytes,
+                    .downstream_bytes = self.downstreamBytes,
+                    .cache_buf = if (self.cachePut != null) &cache_buf else null,
+                };
 
-            // vtable proxy_upstream_filter — user intercept (replaces old boilerplate)
-            if (self.vtable.proxy_upstream_filter) |f| {
-                if (!f(self.inner, &session, &ctx)) {
-                    log.info("proxy: upstream filter blocked request", .{});
-                    return null;
-                }
-            }
-
-            if (self.vtable.upstream_request_filter) |f| {
-                f(self.inner, &session, &ctx) catch return error.ProcessFailed;
-            }
-
-            // ---- request body forwarding hint ----
-            // ponytail: POST body detection via findHeader crashes on >1st
-            // request in concurrent accept path due to stack buffer corruption
-            // under std.Io.Threaded scheduling. Disabled until the reader
-            // buffer ownership model is fixed. (Session.body_hint defaults .none)
-
-            // ---- retry loop ----
-            var retries: usize = 0;
-            while (retries <= self.max_retries) : (retries += 1) {
-                if (retries > 0) {
-                    session.peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
-                    session.retries = retries;
+                // vtable proxy_upstream_filter — user intercept (replaces old boilerplate)
+                if (self.vtable.proxy_upstream_filter) |f| {
+                    if (!f(self.inner, &session, &ctx)) {
+                        log.info("proxy: upstream filter blocked request", .{});
+                        return null;
+                    }
                 }
 
-                // Fresh capture per dispatch attempt: a failed attempt may have
-                // written partial garbage to client and cache.
-                session.cache_total_written = 0;
-                session.cache_cap_len = 0;
+                if (self.vtable.upstream_request_filter) |f| {
+                    f(self.inner, &session, &ctx) catch return error.ProcessFailed;
+                }
 
-                if (self.onUpstreamConnect) |cb| cb(self.inner);
-                const result = proxyToH1(&session, &writer.interface, raw);
-                if (self.onUpstreamDisconnect) |cb| cb(self.inner);
+                // ---- request body forwarding hint ----
+                // ponytail: POST body detection via findHeader crashes on >1st
+                // request in concurrent accept path due to stack buffer corruption
+                // under std.Io.Threaded scheduling. Disabled until the reader
+                // buffer ownership model is fixed. (Session.body_hint defaults .none)
 
-                if (result == .ok) {
-                    // ponytail: cache small responses that fit `cache_buf`
-                    // entirely, keyed by request path. Larger responses bypass
-                    // — full-response capture would need arena alloc per request.
-                    if (self.cachePut) |put_fn| {
-                        if (session.cache_cap_len == session.cache_total_written) {
-                            put_fn(self.inner, request.path, cache_buf[0..session.cache_cap_len]);
+                // ---- retry loop ----
+                var retries: usize = 0;
+                while (retries <= self.max_retries) : (retries += 1) {
+                    if (retries > 0) {
+                        session.peer = ProxyHttp(T).upstreamPeer(self.inner, &ctx);
+                        session.retries = retries;
+                    }
+
+                    // Fresh capture per dispatch attempt: a failed attempt may have
+                    // written partial garbage to client and cache.
+                    session.cache_total_written = 0;
+                    session.cache_cap_len = 0;
+
+                    if (self.onUpstreamConnect) |cb| cb(self.inner);
+                    const result = proxyToH1(&session, &writer.interface, raw);
+                    if (self.onUpstreamDisconnect) |cb| cb(self.inner);
+
+                    if (result == .ok) {
+                        // ponytail: cache small responses that fit `cache_buf`
+                        // entirely, keyed by request path. Larger responses bypass
+                        // — full-response capture would need arena alloc per request.
+                        if (self.cachePut) |put_fn| {
+                            if (session.cache_cap_len == session.cache_total_written) {
+                                put_fn(self.inner, request.path, cache_buf[0..session.cache_cap_len]);
+                            }
                         }
+                        break;
                     }
-                    break;
-                }
-                if (self.onUpstreamError) |cb| cb(self.inner);
-                if (result == .blocked) return null;
-                if (retries == self.max_retries) {
-                    if (self.vtable.fail_to_connect) |f| {
-                        f(self.inner, &session, &ctx, session.peer, error.ConnectFailed) catch {};
+                    if (self.onUpstreamError) |cb| cb(self.inner);
+                    if (result == .blocked) return null;
+                    if (retries == self.max_retries) {
+                        if (self.vtable.fail_to_connect) |f| {
+                            f(self.inner, &session, &ctx, session.peer, error.ConnectFailed) catch {};
+                        }
+                        return error.ProcessFailed;
                     }
-                    return error.ProcessFailed;
                 }
-            }
 
-            if (self.vtable.upstream_response_filter) |f| {
-                f(self.inner, &session, &ctx) catch {};
-            }
-            if (self.vtable.response_filter) |f| {
-                f(self.inner, &session, &ctx) catch {};
-            }
+                if (self.vtable.upstream_response_filter) |f| {
+                    f(self.inner, &session, &ctx) catch {};
+                }
+                if (self.vtable.response_filter) |f| {
+                    f(self.inner, &session, &ctx) catch {};
+                }
 
-            if (self.vtable.logging) |f| {
-                f(self.inner, &session, &ctx, null);
-            } else if (session.response) |resp| {
-                log.debug("proxy: {s} {s} → {d}", .{ @tagName(request.method), request.path, resp.status_code });
-            } else {
-                log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
-            }
+                if (self.vtable.logging) |f| {
+                    f(self.inner, &session, &ctx, null);
+                } else if (session.response) |resp| {
+                    log.debug("proxy: {s} {s} → {d}", .{ @tagName(request.method), request.path, resp.status_code });
+                } else {
+                    log.debug("proxy: {s} {s}", .{ @tagName(request.method), request.path });
+                }
 
-            // keep-alive: loop back for the next request on this connection.
-            // The upstream response's Connection header governs reuse; an
-            // idle or closed client trips the bounded wait and closes.
+                // keep-alive: loop back for the next request on this connection.
+                // The upstream response's Connection header governs reuse; an
+                // idle or closed client trips the bounded wait and closes.
             }
         }
 
@@ -429,7 +429,7 @@ fn proxyToH1(
         if (!pooled) ups.close(io);
     }
 
-// send request to upstream (headers + optional body)
+    // send request to upstream (headers + optional body)
     if (client_buf.len > 0) {
         var ups_write_buf: [4096]u8 = undefined;
         var ups_writer = net.Stream.writer(ups, io, &ups_write_buf);
@@ -507,7 +507,7 @@ fn proxyToH1(
 
         // check if we have complete headers (\r\n\r\n)
         if (header_len >= 4) {
-            if (std.mem.eql(u8, header_buf[header_len - 4..header_len], "\r\n\r\n")) {
+            if (std.mem.eql(u8, header_buf[header_len - 4 .. header_len], "\r\n\r\n")) {
                 break;
             }
         }

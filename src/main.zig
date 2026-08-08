@@ -2,11 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log.scoped(.zigora);
 const Io = std.Io;
+const net = std.Io.net;
+const Stream = net.Stream;
 const core = @import("zigora-core");
 const proxy = @import("zigora-proxy");
 const lb = @import("zigora-lb");
 const metrics = @import("zigora-metrics");
 const memcache = @import("zigora-memory-cache");
+const pool = @import("zigora-pool");
 
 const BackendCfg = struct {
     addrs: std.ArrayList([]const u8),
@@ -22,7 +25,36 @@ const AppState = struct {
     counter: std.atomic.Value(u64) = .{ .raw = 0 },
     response_cache: memcache.MemoryCache([]const u8),
     cache_allocator: std.mem.Allocator,
+    /// Set after the runtime exists; used by the pool's destroy closure.
+    runtime: ?*core.NoStealRuntime = null,
+    upstream_pool: pool.ConnectionPool(Stream),
 };
+
+/// Liveness probe: PEEK the socket without consuming. Alive iff the peer
+/// hasn't FIN'd or reset and no leftover bytes sit in the buffer (a leftover
+/// means a protocol desync, so the conn must not be reused).
+fn poolIsLive(ctx: ?*anyopaque, s: *Stream) bool {
+    const st: *AppState = @ptrCast(@alignCast(ctx.?));
+    var buf: [1]u8 = undefined;
+    const r = std.os.linux.recvfrom(
+        s.socket.handle,
+        &buf,
+        1,
+        std.os.linux.MSG.PEEK | std.os.linux.MSG.DONTWAIT,
+        null,
+        null,
+    );
+    const live = std.os.linux.errno(r) == .AGAIN;
+    if (live) st.metrics.incPoolReuse();
+    return live;
+}
+
+/// Close a pooled conn the pool decided to drop (dead or stale).
+fn poolDestroy(ctx: ?*anyopaque, s: *Stream) void {
+    const st: *AppState = @ptrCast(@alignCast(ctx.?));
+    st.metrics.incPoolStale();
+    if (st.runtime) |rt| s.close(rt.acceptIo());
+}
 
 const MyProxy = struct {
     pub const CTX = proxy.Ctx;
@@ -116,10 +148,18 @@ pub fn main(init: std.process.Init) !void {
         .metrics = m,
         .response_cache = resp_cache,
         .cache_allocator = allocator,
+        .upstream_pool = undefined,
     };
     // Deinit the copy AppState holds — the proxy mutates it, so the local
     // copy's arraylist pointers go stale after the first put.
     defer state.response_cache.deinit();
+    state.upstream_pool = pool.ConnectionPool(Stream).init(allocator, 16, .{
+        .idle_ms = 5 * std.time.ns_per_s,
+        .ctx = @ptrCast(&state),
+        .is_live = poolIsLive,
+        .destroy = poolDestroy,
+    });
+    defer state.upstream_pool.deinit();
 
     var server = core.Server.new(allocator, .{});
     defer server.deinit();
@@ -131,6 +171,7 @@ pub fn main(init: std.process.Init) !void {
     const n_cpu: usize = std.Thread.getCpuCount() catch 4;
     var runtime = try core.NoStealRuntime.init(allocator, n_cpu);
     defer runtime.deinit();
+    state.runtime = &runtime;
 
     var my_proxy = MyProxy{ .state = &state };
     const Svc = core.Service(proxy.HttpProxy(MyProxy));
@@ -157,10 +198,7 @@ pub fn main(init: std.process.Init) !void {
     }.cb;
     proxy_app.upstreamBytes = &state.metrics.bytes_upstream;
     proxy_app.downstreamBytes = &state.metrics.bytes_downstream;
-    // ponytail: upstream_pool disabled — pool returns dead connections
-    // because we don't detect closed sockets before reuse. Enable when
-    // the pool has a liveness check (SO_KEEPALIVE or send probe).
-    // proxy_app.upstream_pool = &state.upstream_pool;
+    proxy_app.upstream_pool = &state.upstream_pool;
     proxy_app.cacheLookup = MyProxy.cacheLookup;
     proxy_app.cachePut = MyProxy.cachePut;
 

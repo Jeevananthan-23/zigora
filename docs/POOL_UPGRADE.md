@@ -5,16 +5,15 @@ Scope of the pool makeover: make `ConnectionPool` return *live* connections so
 without hand-rolling lock-free primitives, and add timeout-based idle
 eviction. See `V0.4_ROADMAP.md` §3.2 for the originating requirements.
 
-## Current state (why it's disabled)
+## Current state
 
-- `src/main.zig:160` comments out `proxy_app.upstream_pool = &state.upstream_pool`.
+- `src/main.zig` wires `proxy_app.upstream_pool = &state.upstream_pool`
+  (re-enabled 2026-08-08; was disabled pending liveness).
 - `lib/zigora_proxy/root.zig:426`:
-  `p.get(pool_key) orelse net.IpAddress.connect(...)` — the pool can hand back
-  a `Stream` whose peer already closed it; the first write then fails the
-  dispatch (mitigated only by the `max_retries = 1` retry loop).
-- `lib/zigora_pool/root.zig` today: one global `Mutex` + per-key `PoolNode`
-  (`ArrayList` + O(n) `orderedRemove(0)`), cap-hit ⇒ reject-new. No liveness,
-  no TTL.
+  `p.get(pool_key) orelse net.IpAddress.connect(...)` — if the pool hands back
+  a dead `Stream` (peer closed it), the first write fails the dispatch
+  (mitigated by the `max_retries = 1` retry loop); the connected state is
+  caught at `get` time by the TTL / `is_live` checks.
 
 ## Decisions (2026-08-02, researched against pingora-pool source)
 
@@ -53,23 +52,38 @@ is unchanged, so `root.zig` dispatch needs no edits.
 ## File by file
 
 1. **`lib/zigora_pool/root.zig`**
-   - `PoolNode(S)`: 16-slot fixed ring (`[16]?Entry` + head/tail/count) +
-     `ArrayList` spillover; `getAny`/`insert` O(1) on the hot path.
-   - Entry gains `put_idle_at: i64` (monotonic clock).
+   - `PoolNode(S)`: hot ring is `stdx.queue.ArrayQueue(Entry, 16)` (FIFO, no
+     manual head/tail) + `ArrayList` spillover (LIFO tail-pop); `remove(id)`
+     drains/repushes the ring and scans the spill.
+   - Entry gains `put_idle_at: i64` (linux monotonic clock via
+     `std.os.linux.clock_gettime(.MONOTONIC)`).
    - `ConnectionPool(S)` gains opts: `idle_ms: u64 = 0`, `is_live`,
-     `destroy`; `get` performs lazy liveness+TTL dropping.
+     `destroy`; `get` performs lazy liveness+TTL dropping (bounded to 8 pops
+     so a mass-death burst drains across subsequent gets).
+   - Tests: 7 cases (ring FIFO, spill LIFO, remove-by-id, TTL drop via
+     `destroy`, `is_live` reject/reuse, size-cap reject) — wired as a real
+     `zigora-pool` test step in `build.zig` (pool tests never ran before;
+     `src/root.zig` does not import the pool module).
 2. **`src/main.zig`**
    - `AppState` gains `upstream_pool: pool.ConnectionPool(Stream)`
-     (`size_limit = 16`, `idle_ms = 5000`).
+     (`size_limit = 16`, `idle_ms = 5 * std.time.ns_per_s`).
    - `is_live`/`destroy` closures: peek on `.socket.handle`; close via
      `runtime.acceptIo()` (any engine's io works for close).
-   - Re-enable `proxy_app.upstream_pool`; drop the ponytail comment.
-   - Metrics: `pool_reuse`, `pool_stale` counters rendered in `/metrics`.
-3. **`lib/zigora_proxy/root.zig`**: no changes (contract unchanged).
+   - Metrics: `pool_reuse` (live PEEK on reuse), `pool_stale` (TTL/`is_live`
+     drops) rendered in `/metrics` + admin table.
+3. **`lib/zigora_proxy/root.zig`**: put path unchanged (contract unchanged).
 4. **Docs**: `V0.4_ROADMAP.md` §3.2 + `CHANGELOG.md`.
 
 ## Deferred (roadmap bullets we are not building now)
 
+- Hook the hot ring to `std.Io.Queue` — evaluated (2026-08-08):
+  `std.Io.Queue` on 0.16 is an MPMC FIFO that needs an `io` per op, blocks
+  (non-blocking via `min = 0` forms) and, unlike `stdx.queue.ArrayQueue`,
+  exposes **no `len()` and no `remove(id)`** — both the per-key capacity
+  accounting and the connection-id removal rely on those. Kept the
+  `ArrayQueue` ring. Upgrade path if a contention bench ever demands a real
+  MPMC: adopt `stdx.Io.Queue` behind the idle-limiter gate (drop
+  `total_size` accounting by trusting the limiter's in-flight count).
 - Lock-free CAS hot queue (crossbeam ArrayQueue equivalent) — std 0.16 has no
   MPMC ring; not justified until a contention benchmark shows the mutex.
 - Pingora's LRU eviction — keep existing size-limit reject-new.
@@ -78,8 +92,11 @@ is unchanged, so `root.zig` dispatch needs no edits.
 
 ## Verification
 
-- `zig build && zig build test` — pool tests cover FIFO ring order, stale
-  drop via `destroy`, `is_live` rejection, ring spill/underflow.
-- Miss-path bench (node upstream, **unique** paths so cache always misses but
-  the backend key stays stable): toggle pool on/off, 2-3 runs; assert
-  `pool_reuse > 0` in `/metrics`, read errors ≈ 0, Debug shutdown clean.
+- `zig build && zig build test` — pool tests (7) cover FIFO ring order, spill
+  LIFO, remove-by-id, TTL drop via `destroy`, `is_live` rejection, size-cap.
+- Miss-path bench (node upstream on :9000, **unique** paths — `/bench/N/<r>`
+  — so the cache never serves them but the backend key stays stable; wrk lua
+  must use `--` Lua comments, `//` silently falls back to `GET /` and the
+  cache path masks everything): 10s `wrk -t4 -c100` measured
+  `pool_reuse ≈ 6k` on ~6.2k miss-path requests, `pool_stale ≈ 2`, read
+  errors ≈ 0, Debug shutdown clean.

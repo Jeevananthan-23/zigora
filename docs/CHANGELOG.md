@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.4.0-alpha7 — 2026-08-08
+
+Upstream connection pool liveness: `ConnectionPool` now hands back *live*
+connections (TTL + PEEK liveness, lazy on `get`) and `upstream_pool` is
+re-enabled in `zigora`. Verified by a unique-path miss bench: `pool_reuse
+≈ 6k` in a 10s `wrk -t4 -c100` run, `pool_stale ≈ 2`, zero read errors.
+
+### Additions
+
+- **pool** (`lib/zigora_pool/root.zig`): `PoolNode` hot ring switched to
+  `stdx.queue.ArrayQueue(Entry, 16)` (vendored TigerBeetle `stdx` — the
+  only stdx module wired, `stdx-queue`) + `ArrayList` spill (LIFO tail-pop);
+  `remove(id)` drains/repushes the ring (kills the old O(n) `orderedRemove(0)`).
+  Entries carry `put_idle_at` from the linux monotonic clock.
+- **pool**: `ConnectionPool.Options` — `idle_ms` (TTL, 0 = off), `ctx`,
+  `is_live`, `destroy` closures; `get` lazily drops stale/dead entries
+  (≤ 8 pops) via `destroy` and returns only live conns. Caller contract
+  unchanged (`?S` + `orelse connect`).
+- **build**: new `zigora-pool` test step — pool tests (7) actually run now
+  (they were never collected; `src/root.zig` doesn't import the pool).
+- **main** (`src/main.zig`): `AppState.upstream_pool` (`size_limit 16`,
+  `idle_ms 5s`), `poolIsLive`/`poolDestroy` closures (PEEK + close via
+  `runtime.acceptIo()`), re-enables `proxy_app.upstream_pool`.
+- **metrics**: `zigora_pool_reuse` / `zigora_pool_stale` counters in
+  `/metrics` and the admin table.
+
+### Notes
+
+- stdx module analysis (TigerBeetle vendored stdlib, 0.16 API): full-root
+  use won't compile on 0.16 (`@typeInfo(T).Struct` in `json.zig` + root
+  `refAllDecls`), so it is imported file-by-file; only `queue.zig` is wired.
+- The original "pool never reused under load" bench turned out to be a
+  broken bench: wrk's lua used `//` comments (invalid Lua) so wrk silently
+  fell back to `GET /`, the cache served everything, and the pool was never
+  exercised. Fixed fixture: unique `/bench/N/<r>` paths (see
+  `docs/POOL_UPGRADE.md` Verification).
+- Evented/io_uring research recorded in `docs/V0.4_ROADMAP.md` §3.1.
+
 ## v0.4.0-alpha6 — 2026-08-02
 
 Pingora-style NoSteal runtime: the shared `Io.Threaded` pool is replaced

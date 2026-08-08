@@ -37,10 +37,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const stdx_queue_mod = b.addModule("stdx-queue", .{
+        .root_source_file = b.path("stdx/queue.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const pool_mod = b.addModule("zigora-pool", .{
         .root_source_file = b.path("lib/zigora_pool/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "stdx-queue", .module = stdx_queue_mod },
+        },
     });
     const memcache_mod = b.addModule("zigora-memory-cache", .{
         .root_source_file = b.path("lib/zigora_memory_cache/root.zig"),
@@ -214,10 +222,14 @@ pub fn build(b: *std.Build) void {
     const metrics_tests = b.addTest(.{ .root_module = metrics_mod, .name = "zigora-metrics" });
     const run_metrics_tests = b.addRunArtifact(metrics_tests);
 
+    const pool_tests = b.addTest(.{ .root_module = pool_mod, .name = "zigora-pool" });
+    const run_pool_tests = b.addRunArtifact(pool_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_metrics_tests.step);
+    test_step.dependOn(&run_pool_tests.step);
 
     // --- Benchmarks ---
     const bench_step = b.step("bench", "Run all benchmarks");
