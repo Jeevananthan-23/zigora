@@ -37,6 +37,11 @@ re-enabled in `zigora`. Verified by a unique-path miss bench: `pool_reuse
   exercised. Fixed fixture: unique `/bench/N/<r>` paths (see
   `docs/POOL_UPGRADE.md` Verification).
 - Evented/io_uring research recorded in `docs/V0.4_ROADMAP.md` §3.1.
+- Re-ran the Pingora head-to-head (`docs/BENCHMARK.md`, 2026-08-08): the
+  2026-08-02 "0 req/s vs fast upstream" failure is fixed — miss path now
+  7.9-8.5K req/s (~0 errors, pool 98% reused) vs pingora 12.9-13.4K; cached
+  `/` 68K vs pingora's keep-alive-only 14.3K; 41 MB vs 11.9 MB RSS under
+  load.
 
 ## v0.4.0-alpha6 — 2026-08-02
 

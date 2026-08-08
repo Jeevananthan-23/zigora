@@ -125,7 +125,64 @@ Best-valid runs: **~17-19K req/s**, ~3.8ms median latency (p99.99 1.3-1.9s tail 
 
 ---
 
-## Pingora comparison — 2026-08-02
+## Pingora comparison — 2026-08-08 (re-run, v0.4.1-alpha7)
+
+Same machine, tool, and upstreams. Pingora: Cloudflare Pingora 0.8.0 source
+(`~/projects/rust/pingora`), `pingora/examples/bench_proxy.rs` (listener
+8081, `BasicPeer` upstream), release binary prebuilt. Zigora:
+`--release=fast`, `--backend 127.0.0.1:9000`, listener 8080. Upstream: node
+http server, 1.5KB `x` bodies, HTTP/1.1 keep-alive (direct ceiling
+11.2K req/s, 99% p99 22ms).
+
+### Miss path (unique URLs — cache never serves, upstream pool is the path)
+
+Both proxies keep-alive to their clients; zigora's upstream pool is live
+(`zigora_pool_reuse ≈ 155k / 98% of requests, stale 1`), the thing the
+2026-08-02 run couldn't test (see CHANGELOG v0.4.0-alpha7 for why).
+
+| Metric (wrk -t4 -c100 -d20s) | Pingora | Zigora |
+|------------------------------|---------|--------|
+| Requests/s | 12,867 | 7,893 |
+| Latency p50 / p99 | 6.6ms / 17ms | 10.6ms / 268ms |
+| Read errors | 0 | 4 |
+
+Pingora wins the miss path 1.6x; both are upstream-bound-ish (node ceiling
+11.2K). Zigora's p99 (268ms) is the storm pattern from alpha6 (bimodal
+1K-19K req/s) — its keep-alive loop's 50ms receive-wait can stall per
+connection under load; that's the next V0.4 item (see roadmap §3.4).
+
+### Hit path (same 1.5KB body, `/` key)
+
+Pingora has no cache: `/` exercises its full keep-alive proxy path.
+
+| Metric | Pingora `/` | Zigora `/` (cached) |
+|--------|-------------|---------------------|
+| Requests/s | 14,275 | 68,024 |
+| Latency p50 / p99 | 6.8ms / 13ms | 0.70ms / 477ms |
+| Read errors | 0 | 20 (~0.001%) |
+
+### Memory under load (14s burst, VmRSS)
+
+| Proxy | RSS |
+|-------|-----|
+| Pingora | 11.9 MB |
+| Zigora | 41 MB |
+
+### Findings
+
+- **Verdict flipped from 2026-08-02**: the fast-upstream "0 req/s, 100%
+  response loss" failure (a body-truncation bug + no downstream keep-alive +
+  close race, fixed in 4.0.5-alpha5 and 4.0-indigo6) is gone. Zigora now
+  sustains the miss path at 7.9-8.5K req/s with ~0 read errors and a live
+  98%-reuse upstream pool.
+- The remaining 1.6x miss-path gap vs pingora is latency-tail + per-conn
+  scheduling, not correctness — pingora keeps flat 7ms; zigora's p99 tails
+  to 268ms.
+- Zigora's cached path (68K req/s, p50 0.7h) is the tier the bare pingora
+  proxy doesn't have (pingora gains it via pingora-cache with different
+  defaults).
+
+## Pingora comparison — 2026-08-02 (original, stale)
 
 Same machine, tool, and upstreams. Pingora: Cloudflare Pingora 0.8.0 source
 (`~/projects/rust/pingora`), a minimal proxy example (listener 8081, one
