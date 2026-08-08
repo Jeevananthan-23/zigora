@@ -14,16 +14,16 @@ pub const zgcore = @This();
 pub const Stream = net.Stream;
 
 // Re-export sub-modules for consumers
-pub const listeners_mod = @import("listeners.zig");
+pub const listeners_mod = @import("zigora_core/listeners.zig");
 pub const Listeners = listeners_mod.Listeners;
-pub const service_mod = @import("service.zig");
+pub const service_mod = @import("zigora_core/service.zig");
 pub const Service = service_mod.Service;
 pub const ServiceHandle = service_mod.ServiceHandle;
 pub const ServerApp = service_mod.ServerApp;
-pub const server_mod = @import("server.zig");
+pub const server_mod = @import("zigora_core/server.zig");
 pub const Server = server_mod.Server;
 pub const ServerConf = server_mod.ServerConf;
 pub const ExecutionPhase = server_mod.ExecutionPhase;
 pub const ShutdownWatch = server_mod.ShutdownWatch;
-pub const runtime_mod = @import("runtime.zig");
+pub const runtime_mod = @import("zigora_core/runtime.zig");
 pub const NoStealRuntime = runtime_mod.NoStealRuntime;

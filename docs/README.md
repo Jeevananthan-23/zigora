@@ -2,7 +2,7 @@
 
 A native **Zig** port of Cloudflare's [Pingora](https://github.com/cloudflare/pingora) — an HTTP reverse proxy and load-balancer framework written from scratch, without any external dependencies and without a generic async runtime.
 
-Zigora is both a **framework** (a library — `lib/zigora_core`, `lib/zigora_proxy`, …) and a **working binary** (`zig-out/bin/zigora`) that demonstrates the full feature set. All scheduling runs on Zig 0.16's `std.Io` worker pool (`io.async`, `Group.concurrent`) — there is **no `std.Thread.spawn` anywhere** in the framework.
+Zigora is both a **framework** (a library — `src/zigora_core.zig`, `src/zigora_proxy.zig`, …) and a **working binary** (`zig-out/bin/zigora`) that demonstrates the full feature set. All scheduling runs on Zig 0.16's `std.Io` worker pool (`io.async`, `Group.concurrent`) — there is **no `std.Thread.spawn` anywhere** in the framework.
 
 **Why it exists:** Pingora is Rust + tokio. Zigora re-implements the same server model (`Server` → `Service` → proxy app), connection pooling, load balancing, caching, and metrics in Zig with a single-file runtime you can actually read.
 
@@ -108,20 +108,20 @@ All I/O is driven by `std.Io`; the `NoStealRuntime` owns the `Io.Threaded` engin
 
 | Package | Path | Purpose |
 |---|---|---|
-| `zigora_core` | `lib/zigora_core/` | `Server`, `Service`, `Listeners`, `ServerApp` vtable, `NoStealRuntime` |
-| `zigora_proxy` | `lib/zigora_proxy/` | `ProxyHttp` trait, `HttpProxy` app, filter chain, `/metrics` `/admin`, cache hooks |
-| `zigora_http` | `lib/zigora_http/` | HTTP/1.1 `Request`, `ResponseHeader`, wire serialization, `HttpTask` |
-| `zigora_error` | `lib/zigora_error/` | `ZgError` with source tracking |
-| `zigora_limits` | `lib/zigora_limits/` | `Estimator` (CMS), `Inflight`, `Rate` limiters |
-| `zigora_lru` | `lib/zigora_lru/` | sharded weighted LRU |
-| `zigora_ketama` | `lib/zigora_ketama/` | consistent-hash ring (CRC32, 160 pts/weight) |
-| `zigora_tinyufo` | `lib/zigora_tinyufo/` | TinyUFO admission cache |
-| `zigora_pool` | `lib/zigora_pool/` | reusable connection pool |
-| `zigora_lb` | `lib/zigora_lb/` | `LoadBalancer(S)` — RR / Random / FNVHash / Consistent |
-| `zigora_cache` | `lib/zigora_cache/` | HTTP cache state machine + vtable |
-| `zigora_memory_cache` | `lib/zigora_memory_cache/` | in-memory `MemoryCache(T)` with TTL |
-| `zigora_tls` | `lib/zigora_tls/` | TLS accept/connect adapter (interface stubs) |
-| `zigora_metrics` | `lib/zigora_metrics/` | atomic counters, Prometheus + admin renderers |
+| `zigora_core` | `src/zigora_core.zig` | `Server`, `Service`, `Listeners`, `ServerApp` vtable, `NoStealRuntime` |
+| `zigora_proxy` | `src/zigora_proxy.zig` | `ProxyHttp` trait, `HttpProxy` app, filter chain, `/metrics` `/admin`, cache hooks |
+| `zigora_http` | `src/zigora_http.zig` | HTTP/1.1 `Request`, `ResponseHeader`, wire serialization, `HttpTask` |
+| `zigora_error` | `src/zigora_error.zig` | `ZgError` with source tracking |
+| `zigora_limits` | `src/zigora_limits.zig` | `Estimator` (CMS), `Inflight`, `Rate` limiters |
+| `zigora_lru` | `src/zigora_lru.zig` | sharded weighted LRU |
+| `zigora_ketama` | `src/zigora_ketama.zig` | consistent-hash ring (CRC32, 160 pts/weight) |
+| `zigora_tinyufo` | `src/zigora_tinyufo.zig` | TinyUFO admission cache |
+| `zigora_pool` | `src/zigora_pool.zig` | reusable connection pool |
+| `zigora_lb` | `src/zigora_lb.zig` | `LoadBalancer(S)` — RR / Random / FNVHash / Consistent |
+| `zigora_cache` | `src/zigora_cache.zig` | HTTP cache state machine + vtable |
+| `zigora_memory_cache` | `src/zigora_memory_cache.zig` | in-memory `MemoryCache(T)` with TTL |
+| `zigora_tls` | `src/zigora_tls.zig` | TLS accept/connect adapter (interface stubs) |
+| `zigora_metrics` | `src/zigora_metrics.zig` | atomic counters, Prometheus + admin renderers |
 
 See `ARCHITECTURE.md` for the dependency graph and per-module surface.
 

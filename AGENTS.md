@@ -19,25 +19,25 @@ Compact guidance for OpenCode sessions working in this repo. Read `docs/ARCHITEC
 A Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pingora) HTTP reverse proxy framework. The authoritative module map and dependency graph live in `docs/ARCHITECTURE.md`; the Pingora reference doc is `docs/PINGORA_ARCHITECTURE.md`. Key structural facts:
 
 - `src/main.zig` is the binary entrypoint (`pub fn main(init: std.process.Init) !void` — note the 0.16 signature). Unlike Pingora (lib-only), Zigora ships as a binary.
-- `src/root.zig` is the public library root for consumers; re-exports v0.1 sub-packages via named build-module imports.
-- `lib/root.zig` is the umbrella re-exporter for all sub-packages. Eleven packages exist on disk; v0.1 implements four (`zigora_core`, `zigora_proxy`, `zigora_http`, `zigora_error`); v0.2 phase 1 implements five more (`zigora_limits`, `zigora_lru`, `zigora_ketama`, `zigora_tinyufo`, `zigora_pool`); the rest are reserved for v0.2 phases 2-4.
+- `src/root.zig` is the public library root for consumers; re-exports every package as a namespace (`pub const core = @import("zigora_core.zig")`, etc.) plus flat aliases (`pub const Server = core.Server`).
+- Every package is a **single file** under `src/` (e.g. `src/zigora_http.zig`), imported by relative path (`@import("zigora_http.zig")`). The only subdirectory is `src/zigora_core/` (listeners/runtime/server/service), re-exported via `src/zigora_core.zig`. `lib/` no longer exists.
+- Eleven packages exist on disk; v0.1 implements four (`zigora_core`, `zigora_proxy`, `zigora_http`, `zigora_error`); v0.2 phase 1 implements five more (`zigora_limits`, `zigora_lru`, `zigora_ketama`, `zigora_tinyufo`, `zigora_pool`); the rest are reserved for v0.2 phases 2-4.
 
 ## Async / I/O
 
-v0.1 used `std.Thread.spawn` per service; **v0.1.1 onward uses `io.async` + `Future.await` for services and `Group.concurrent` for per-connection dispatch**. No manual thread spawning anywhere in the framework — the `std.Io` worker pool (Threaded/Uring/Evented) schedules everything. See `lib/zigora_core/server.zig` and `lib/zigora_core/service.zig`.
+v0.1 used `std.Thread.spawn` per service; **v0.1.1 onward uses `io.async` + `Future.await` for services and `Group.concurrent` for per-connection dispatch**. No manual thread spawning anywhere in the framework — the `std.Io` worker pool (Threaded/Uring/Evented) schedules everything. See `src/zigora_core/server.zig` and `src/zigora_core/service.zig`.
 
 ## Sub-package naming
 
-- On-disk directories use **underscores** (`zigora_core`).
-- User-facing module labels in `build.zig` use **hyphens** (`zigora-core`).
-- `@import("zigora-core")` refers to the module label. `b.path("lib/zigora_core/root.zig")` refers to the filesystem.
-- Mismatching these is the only common build error in this repo.
+- On-disk files use **underscores** (`zigora_core.zig`).
+- The library root `src/root.zig` re-exports each package as a namespace: `pub const core = @import("zigora_core.zig")`, so consumers write `zigora.core`, `zigora.pool`, etc.
+- Packages import each other by relative path only — no named-module imports inside `src/`. All relative imports propagate test blocks, so `zig build test` collects tests from every package (unlike the old named-module wiring, which silently ran only root-file tests).
+- Mismatching import paths is the only common build error in this repo.
 
 ## Wiring rules
 
-- Every package reachable from `src/main.zig` or `src/root.zig` must be registered as a named module in `build.zig` via `b.addModule()`.
-- Every named module that imports another module must list that module in its `.imports` table.
-- `lib/root.zig` must `pub const zg<name> = @import("zigora_<name>/root.zig");` for every on-disk package, so the umbrella builds even for reserved stubs.
+- Only two modules exist in `build.zig`: the `zigora` library module (root `src/root.zig`, `.imports` empty — everything is relative) and the `exe` module (root `src/main.zig`, imports `zigora`).
+- Examples and benches import the library via `.imports = &.{. { .name = "zigora", .module = mod } }` and use `const zigora = @import("zigora"); const core = zigora.core;`.
 - Tests: `b.addTest(.{ .root_module = mod })` tests the `zigora` library module; `b.addTest(.{ .root_module = exe.root_module })` tests the exe's root module. Both run in parallel via the `test` top-level step.
 
 ## Release conventions

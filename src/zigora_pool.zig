@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.pool);
-const queue = @import("stdx-queue");
+const queue = @import("stdx_queue.zig");
 
 /// ponytail: simple spinlock wrapping std.atomic.Mutex for the old
 /// std.Thread.Mutex API. Upgrade to std.Io.Mutex + io context when async.

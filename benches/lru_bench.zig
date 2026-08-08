@@ -1,5 +1,6 @@
 const std = @import("std");
-const lru = @import("zigora-lru");
+const zigora = @import("zigora");
+const lru = zigora.lru;
 
 const ITERATIONS: u64 = 2_000_000;
 const SHARDS: usize = 10;

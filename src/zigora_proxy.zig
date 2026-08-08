@@ -10,10 +10,10 @@ const std = @import("std");
 const log = std.log.scoped(.proxy);
 const Io = std.Io;
 const net = std.Io.net;
-const core = @import("zigora-core");
-const http = @import("zigora-http");
-const zgerror = @import("zigora-error");
-const pool = @import("zigora-pool");
+const core = @import("zigora_core.zig");
+const http = @import("zigora_http.zig");
+const zgerror = @import("zigora_error.zig");
+const pool = @import("zigora_pool.zig");
 const Stream = net.Stream;
 
 pub const zgproxy = @This();
@@ -541,8 +541,8 @@ fn proxyToH1(
     session.writeAndCapture(client_writer, header_buf[0..resp.body_start]) catch return .failed;
 
     // determine body transfer mode
-    const content_length = findHeader(resp.headers, "content-length");
-    const transfer_encoding = findHeader(resp.headers, "transfer-encoding");
+    const content_length = findHeader(resp.headers(), "content-length");
+    const transfer_encoding = findHeader(resp.headers(), "transfer-encoding");
     const is_chunked = transfer_encoding != null and std.mem.eql(u8, transfer_encoding.?, "chunked");
     const has_content_length = content_length != null;
 
@@ -660,7 +660,7 @@ fn proxyToH1(
     // pool the upstream connection if pool present and response allows keepalive
     if (upstream_pool) |p| {
         if (session.response) |upstream_resp| {
-            const up_conn_hdr = findHeader(upstream_resp.headers, "connection");
+            const up_conn_hdr = findHeader(upstream_resp.headers(), "connection");
             const wants_close = up_conn_hdr != null and std.ascii.eqlIgnoreCase(up_conn_hdr.?, "close");
             if (!wants_close) {
                 const meta: pool.ConnectionMeta(Stream) = .{
@@ -700,13 +700,13 @@ fn ip4AddrKey(ip4: net.Ip4Address) pool.GroupKey {
 // ===== Tests =====
 
 const TestImpl = struct {
-    pub const CTX = struct {};
+    pub const CTX = Ctx;
 
     pub fn new_ctx(_: *TestImpl) CTX {
         return .{};
     }
 
-    pub fn upstream_peer(_: *TestImpl) HttpPeer {
+    pub fn upstream_peer(_: *TestImpl, _: *Ctx) HttpPeer {
         return .{ .host = "127.0.0.1", .port = 9999 };
     }
 };
@@ -720,12 +720,13 @@ test "HttpPeer stores host and port" {
 test "ProxyHttp newCtx returns context type" {
     var impl = TestImpl{};
     const ctx = ProxyHttp(TestImpl).newCtx(&impl);
-    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@TypeOf(ctx)));
+    try std.testing.expect(@TypeOf(ctx) == Ctx);
 }
 
 test "ProxyHttp upstreamPeer" {
     var impl = TestImpl{};
-    const p = ProxyHttp(TestImpl).upstreamPeer(&impl);
+    var ctx = ProxyHttp(TestImpl).newCtx(&impl);
+    const p = ProxyHttp(TestImpl).upstreamPeer(&impl, &ctx);
     try std.testing.expectEqual(@as(u16, 9999), p.port);
 }
 
@@ -756,6 +757,7 @@ test "integration: Session wraps http.Request + peer" {
     const req = try http.Request.parse(buf[0..raw.len]);
     const sess = Session(Ctx){
         .io = undefined,
+        .stream = undefined,
         .request = req,
         .peer = .{ .host = "x", .port = 80 },
         .ctx = .{},

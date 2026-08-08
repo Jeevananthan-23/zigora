@@ -1,5 +1,6 @@
 const std = @import("std");
-const tinyufo = @import("zigora-tinyufo");
+const zigora = @import("zigora");
+const tinyufo = zigora.tinyufo;
 
 const ITEMS: u64 = 100;
 const ITERATIONS: u64 = 5_000_000;

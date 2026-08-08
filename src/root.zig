@@ -1,12 +1,26 @@
 //! Public root of the `zigora` library module. Consumers import via
-//! `@import("zigora")` and get the v0.1 surface: core + proxy + http + error.
+//! `@import("zigora")` and get the full surface: every sub-package.
 
 const std = @import("std");
 const log = std.log.scoped(.zigora_src);
-const core = @import("zigora-core");
-const http = @import("zigora-http");
-const proxy = @import("zigora-proxy");
-const zgerror = @import("zigora-error");
+
+// Package namespaces (std-style: `zigora.core`, `zigora.pool`, ...)
+pub const core = @import("zigora_core.zig");
+pub const http = @import("zigora_http.zig");
+pub const proxy = @import("zigora_proxy.zig");
+pub const zgerror = @import("zigora_error.zig");
+
+pub const limits = @import("zigora_limits.zig");
+pub const lru = @import("zigora_lru.zig");
+pub const ketama = @import("zigora_ketama.zig");
+pub const tinyufo = @import("zigora_tinyufo.zig");
+pub const pool = @import("zigora_pool.zig");
+pub const memory_cache = @import("zigora_memory_cache.zig");
+pub const lb = @import("zigora_lb.zig");
+pub const cache = @import("zigora_cache.zig");
+pub const tls = @import("zigora_tls.zig");
+pub const metrics = @import("zigora_metrics.zig");
+pub const utils = @import("zigora_utils.zig");
 
 pub const Server = core.Server;
 pub const ServerConf = core.ServerConf;

@@ -8,7 +8,7 @@ Testing against Pingora's architecture reference (`PINGORA_ARCHITECTURE.md`) and
 
 **Severity:** FATAL — every SIGTERM/graceful shutdown crashes.
 
-**Root cause:** The signal handler (`lib/zigora_core/server.zig:53`) sets `shutdown_flag = true`. The service accept loop in `service.zig:150` polls `sh.?.check()` after every `listener.accept()`. But `accept()` is a blocking poll — it only returns on new connection or error. After SIGTERM is delivered with no incoming connections, the accept loop never wakes up to check the flag. 
+**Root cause:** The signal handler (`src/zigora_core/server.zig:53`) sets `shutdown_flag = true`. The service accept loop in `service.zig:150` polls `sh.?.check()` after every `listener.accept()`. But `accept()` is a blocking poll — it only returns on new connection or error. After SIGTERM is delivered with no incoming connections, the accept loop never wakes up to check the flag. 
 
 When a connection *does* arrive after SIGTERM, the accept loop wakes, sees the shutdown flag, exits `acceptLoop`, then `catches` into `runForever`'s `futures[i].await()` which tries to dereference args that were already freed by the `defer allocator.free(futures)` at line 116 — the `slot` pointer inside the `scan` call was captured from `self.services.items` which is alive, but the future's stack frame had the service future's arg pointer freed.
 
@@ -80,10 +80,10 @@ for i in 1 2 3 4 5; do curl -s -m 2 http://127.0.0.1:8080/ -o /dev/null -w "%{ht
 
 | # | Bug | Severity | File(s) | Reproduce |
 |---|-----|----------|---------|-----------|
-| 1 | SIGTERM segfault | FATAL | `lib/zigora_core/server.zig:53-69, 112-165` | `kill -TERM`, then hit with request |
-| 2 | Stale signature in `VTable.process_new` | HIGH | `lib/zigora_core/service.zig:29-31` | Compile with v0.1.1 ref, dispatch any request |
+| 1 | SIGTERM segfault | FATAL | `src/zigora_core/server.zig:53-69, 112-165` | `kill -TERM`, then hit with request |
+| 2 | Stale signature in `VTable.process_new` | HIGH | `src/zigora_core/service.zig:29-31` | Compile with v0.1.1 ref, dispatch any request |
 | 3 | Dead backend `127.0.0.1:9001` hardcoded | HIGH | `src/main.zig:24-28` | 5 sequential requests → #3, #5 fail |
 | 4 | E2E test `$BASE` undefined | MEDIUM | `test/e2e_all.sh:8,20-27` | Run E2E script on a clean clone |
-| 5 | Stale `PerRequestBuffers` import (dead code) | LOW | `lib/zigora_core/service.zig:14-16` | None (just wasted memory) |
+| 5 | Stale `PerRequestBuffers` import (dead code) | LOW | `src/zigora_core/service.zig:14-16` | None (just wasted memory) |
 
 Pingora-style fix reference: `PINGORA_ARCHITECTURE.md` + local source at `/home/jeeva/projects/rust/pingora/` — see `SAN/chat/rust/pingora/pingora-core/src/server/mod.rs` for signal handling (`UnixShutdownSignalMatch`), `pingora-core/src/services/listening.rs` for accept loop (`tokio::select!` with `multitain(start).merge()`) pattern.

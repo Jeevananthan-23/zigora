@@ -5,10 +5,11 @@
 const std = @import("std");
 const log = std.log.scoped(.load_balancer);
 const Io = std.Io;
-const core = @import("zigora-core");
-const proxy = @import("zigora-proxy");
-const lb = @import("zigora-lb");
-const metrics = @import("zigora-metrics");
+const zigora = @import("zigora");
+const core = zigora.core;
+const proxy = zigora.proxy;
+const lb = zigora.lb;
+const metrics = zigora.metrics;
 
 const AppState = struct {
     balancer: lb.LoadBalancer(lb.Consistent),

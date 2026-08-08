@@ -1,5 +1,6 @@
 const std = @import("std");
-const limits = @import("zigora-limits");
+const zigora = @import("zigora");
+const limits = zigora.limits;
 
 const ITERATIONS: u64 = 2_000_000;
 const ITEMS: usize = 100_000;

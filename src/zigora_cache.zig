@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cache);
-const http = @import("zigora-http");
+const http = @import("zigora_http.zig");
 const zgcache = @This();
 
 /// The HTTP cache state machine — phase-driven across a request.
@@ -174,7 +174,7 @@ pub const CacheMeta = struct {
     pub fn fromDefaults(defaults: CacheMetaDefaults) CacheMeta {
         _ = defaults;
         return .{
-            .header = .{ .status_code = 0, .version = .http11, .headers = &.{}, .body_start = 0 },
+            .header = .{ .status_code = 0, .version = .http11, .header_buf = std.mem.zeroes([32]http.Header), .header_count = 0, .body_start = 0 },
             .created_ns = 0,
             .updated_ns = 0,
             .fresh_until_ns = 0,
@@ -280,7 +280,7 @@ test "HttpCache starts disabled by default" {
 
 test "RespCacheable cacheable/uncacheable" {
     const rc = @as(RespCacheable, .{ .cacheable = .{
-        .header = .{ .status_code = 200, .version = .http11, .headers = &.{}, .body_start = 0 },
+        .header = .{ .status_code = 200, .version = .http11, .header_buf = std.mem.zeroes([32]http.Header), .header_count = 0, .body_start = 0 },
         .created_ns = 0,
         .updated_ns = 0,
         .fresh_until_ns = 0,

@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.lb);
-const ketama = @import("zigora-ketama");
+const ketama = @import("zigora_ketama.zig");
 const zglb = @This();
 
 /// A backend server.
@@ -137,7 +137,7 @@ pub const FNVHash = struct {
     }
 
     pub fn next(self: *FNVHash, key: []const u8) usize {
-        var hasher = std.hash.Fnv1a_64{};
+        var hasher = std.hash.Fnv1a_64.init();
         hasher.update(key);
         const r = hasher.final();
         return self.indices[r % self.indices.len];
@@ -321,7 +321,7 @@ test "Consistent distributes and is stable" {
     var seen = [_]bool{ false, false, false };
     for (0..300) |i| {
         var k: [4]u8 = undefined;
-        std.mem.writeInt(u32, &k, i, .little);
+        std.mem.writeInt(u32, &k, @intCast(i), .little);
         const b_ = lb.select(&k) orelse continue;
         const p = std.Io.net.IpAddress.getPort(b_.addr);
         const idx: usize = p - 9000;

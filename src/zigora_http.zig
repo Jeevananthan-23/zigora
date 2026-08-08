@@ -37,9 +37,14 @@ pub const Request = struct {
     method: Method,
     path: []const u8,
     version: Version,
-    headers: []const Header,
+    header_buf: [32]Header,
+    header_count: usize,
     /// Offset into the buffer where the body starts. 0 if no body.
     body_start: usize,
+
+    pub fn headers(self: Request) []const Header {
+        return self.header_buf[0..self.header_count];
+    }
 
     /// Parse an HTTP/1.1 request from a raw buffer. Returns a Request with
     /// slices pointing directly into `buf`. Caller owns `buf`'s lifetime.
@@ -63,10 +68,17 @@ pub const Request = struct {
         const version = versionFromSlice(version_str) orelse return error.UnsupportedVersion;
 
         // ponytail: fixed header cap. Grow if someone ships >32 headers.
-        var headers: [32]Header = undefined;
+        var result: Request = .{
+            .method = method,
+            .path = path,
+            .version = version,
+            .header_buf = undefined,
+            .header_count = 0,
+            .body_start = 0,
+        };
         var header_count: usize = 0;
 
-        while (header_count < headers.len) {
+        while (header_count < result.header_buf.len) {
             if (pos + 2 > buf.len) return error.Incomplete;
             if (std.mem.eql(u8, buf[pos..][0..2], "\r\n")) {
                 pos += 2;
@@ -84,17 +96,13 @@ pub const Request = struct {
             }
             const value = header_line[value_start..];
 
-            headers[header_count] = .{ .name = name, .value = value };
+            result.header_buf[header_count] = .{ .name = name, .value = value };
             header_count += 1;
         }
+        result.header_count = header_count;
+        result.body_start = pos;
 
-        return .{
-            .method = method,
-            .path = path,
-            .version = version,
-            .headers = headers[0..header_count],
-            .body_start = pos,
-        };
+        return result;
     }
 };
 
@@ -152,10 +160,15 @@ pub fn headersToH1Wire(headers: []const Header, writer: anytype) !void {
 pub const ResponseHeader = struct {
     status_code: u16,
     version: Version,
-    headers: []const Header,
+    header_buf: [32]Header,
+    header_count: usize,
     /// Custom reason phrase; `null` → canonical for `status_code`.
     reason_phrase: ?[]const u8 = null,
     body_start: usize,
+
+    pub fn headers(self: ResponseHeader) []const Header {
+        return self.header_buf[0..self.header_count];
+    }
 
     /// Parse an HTTP/1.x response from a raw buffer. Zero-copy slices.
     pub fn parse(buf: []u8) HttpError!ResponseHeader {
@@ -174,9 +187,16 @@ pub const ResponseHeader = struct {
         const reason = buf[pos..line_end];
         pos = line_end + 2;
 
-        var headers: [32]Header = undefined;
+        var result: ResponseHeader = .{
+            .status_code = status_code,
+            .version = version,
+            .header_buf = undefined,
+            .header_count = 0,
+            .reason_phrase = if (reason.len > 0) reason else null,
+            .body_start = 0,
+        };
         var n: usize = 0;
-        while (n < headers.len) {
+        while (n < result.header_buf.len) {
             if (pos + 2 > buf.len) return error.Incomplete;
             if (std.mem.eql(u8, buf[pos..][0..2], "\r\n")) {
                 pos += 2;
@@ -189,17 +209,13 @@ pub const ResponseHeader = struct {
             const name = std.mem.trimEnd(u8, line[0..colon], " \t");
             var vs = colon + 1;
             while (vs < line.len and (line[vs] == ' ' or line[vs] == '\t')) vs += 1;
-            headers[n] = .{ .name = name, .value = line[vs..] };
+            result.header_buf[n] = .{ .name = name, .value = line[vs..] };
             n += 1;
         }
+        result.header_count = n;
+        result.body_start = pos;
 
-        return .{
-            .status_code = status_code,
-            .version = version,
-            .headers = headers[0..n],
-            .reason_phrase = if (reason.len > 0) reason else null,
-            .body_start = pos,
-        };
+        return result;
     }
 
     /// Serialise the status line + headers to HTTP/1.1 wire bytes.
@@ -209,7 +225,7 @@ pub const ResponseHeader = struct {
         try writer.print("{d} ", .{self.status_code});
         try writer.writeAll(self.reason_phrase orelse reasonPhrase(self.status_code));
         try writer.writeAll("\r\n");
-        try headersToH1Wire(self.headers, writer);
+        try headersToH1Wire(self.headers(), writer);
     }
 };
 
@@ -248,9 +264,9 @@ test "parse simple GET request" {
     try std.testing.expectEqual(Method.GET, req.method);
     try std.testing.expectEqualStrings("/", req.path);
     try std.testing.expectEqual(Version.http11, req.version);
-    try std.testing.expectEqual(@as(usize, 1), req.headers.len);
-    try std.testing.expectEqualStrings("Host", req.headers[0].name);
-    try std.testing.expectEqualStrings("localhost", req.headers[0].value);
+    try std.testing.expectEqual(@as(usize, 1), req.headers().len);
+    try std.testing.expectEqualStrings("Host", req.headers()[0].name);
+    try std.testing.expectEqualStrings("localhost", req.headers()[0].value);
     try std.testing.expectEqual(@as(usize, raw.len), req.body_start);
 }
 
@@ -261,7 +277,7 @@ test "parse POST request with headers" {
     const req = try Request.parse(buf[0..raw.len]);
     try std.testing.expectEqual(Method.POST, req.method);
     try std.testing.expectEqualStrings("/api", req.path);
-    try std.testing.expectEqual(@as(usize, 2), req.headers.len);
+    try std.testing.expectEqual(@as(usize, 2), req.headers().len);
 }
 
 test "reject HTTP/2" {
@@ -286,9 +302,9 @@ test "ResponseHeader.parse: 200 OK with headers" {
     try std.testing.expectEqual(@as(u16, 200), r.status_code);
     try std.testing.expectEqual(Version.http11, r.version);
     try std.testing.expectEqualStrings("OK", r.reason_phrase.?);
-    try std.testing.expectEqual(@as(usize, 2), r.headers.len);
-    try std.testing.expectEqualStrings("Content-Length", r.headers[1].name);
-    try std.testing.expectEqualStrings("5", r.headers[1].value);
+    try std.testing.expectEqual(@as(usize, 2), r.headers().len);
+    try std.testing.expectEqualStrings("Content-Length", r.headers()[1].name);
+    try std.testing.expectEqualStrings("5", r.headers()[1].value);
     try std.testing.expectEqual(@as(usize, raw.len - "hello".len), r.body_start);
 }
 
@@ -307,9 +323,9 @@ test "ResponseHeader.toH1Wire: round-trip" {
     @memcpy(buf[0..raw.len], raw);
     const r = try ResponseHeader.parse(buf[0..raw.len]);
     var out: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&out);
-    try r.toH1Wire(fbs.writer());
-    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nHost: x\r\n\r\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&out);
+    try r.toH1Wire(&fbs);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nHost: x\r\n\r\n", out[0..fbs.end]);
 }
 
 test "headersToH1Wire preserves case" {
@@ -318,9 +334,9 @@ test "headersToH1Wire preserves case" {
         .{ .name = "X-Custom", .value = "yes" },
     };
     var out: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&out);
-    try headersToH1Wire(&hs, fbs.writer());
-    try std.testing.expectEqualStrings("Content-Type: text/plain\r\nX-Custom: yes\r\n\r\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&out);
+    try headersToH1Wire(&hs, &fbs);
+    try std.testing.expectEqualStrings("Content-Type: text/plain\r\nX-Custom: yes\r\n\r\n", out[0..fbs.end]);
 }
 
 test "reasonPhrase canonical" {
@@ -330,7 +346,7 @@ test "reasonPhrase canonical" {
 }
 
 test "HttpTask.isEnd" {
-    const h: HttpTask = .{ .header = .{ .hdr = .{ .status_code = 200, .version = .http11, .headers = &.{}, .body_start = 0 }, .end = true } };
+    const h: HttpTask = .{ .header = .{ .hdr = .{ .status_code = 200, .version = .http11, .header_buf = std.mem.zeroes([32]Header), .header_count = 0, .body_start = 0 }, .end = true } };
     try std.testing.expect(h.isEnd());
     const b: HttpTask = .{ .body = .{ .data = "x", .end = false } };
     try std.testing.expect(!b.isEnd());

@@ -1,5 +1,6 @@
 const std = @import("std");
-const ketama = @import("zigora-ketama");
+const zigora = @import("zigora");
+const ketama = zigora.ketama;
 const net = std.Io.net;
 
 const CREATE_ITERS: usize = 100;

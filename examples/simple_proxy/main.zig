@@ -5,9 +5,10 @@
 const std = @import("std");
 const log = std.log.scoped(.simple_proxy);
 const Io = std.Io;
-const core = @import("zigora-core");
-const proxy = @import("zigora-proxy");
-const metrics = @import("zigora-metrics");
+const zigora = @import("zigora");
+const core = zigora.core;
+const proxy = zigora.proxy;
+const metrics = zigora.metrics;
 
 const AppState = struct {
     metrics: metrics.Metrics,

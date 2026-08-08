@@ -8,7 +8,7 @@ const std = @import("std");
 const log = std.log.scoped(.metrics);
 const Io = std.Io;
 const net = std.Io.net;
-const http = @import("zigora-http");
+const http = @import("zigora_http.zig");
 
 pub const zgmetrics = @This();
 

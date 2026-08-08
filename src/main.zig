@@ -4,12 +4,12 @@ const log = std.log.scoped(.zigora);
 const Io = std.Io;
 const net = std.Io.net;
 const Stream = net.Stream;
-const core = @import("zigora-core");
-const proxy = @import("zigora-proxy");
-const lb = @import("zigora-lb");
-const metrics = @import("zigora-metrics");
-const memcache = @import("zigora-memory-cache");
-const pool = @import("zigora-pool");
+const core = @import("zigora_core.zig");
+const proxy = @import("zigora_proxy.zig");
+const lb = @import("zigora_lb.zig");
+const metrics = @import("zigora_metrics.zig");
+const memcache = @import("zigora_memory_cache.zig");
+const pool = @import("zigora_pool.zig");
 
 const BackendCfg = struct {
     addrs: std.ArrayList([]const u8),

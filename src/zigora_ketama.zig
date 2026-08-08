@@ -185,7 +185,7 @@ test "Continuum hash distribution hits all nodes" {
     var seen = [_]bool{ false, false, false };
     for (0..300) |i| {
         var k: [4]u8 = undefined;
-        std.mem.writeInt(u32, &k, i, .little);
+        std.mem.writeInt(u32, &k, @intCast(i), .little);
         const addr = c.node(&k) orelse continue;
         const port = std.Io.net.IpAddress.getPort(addr);
         const idx: usize = @intCast(port - 9000);

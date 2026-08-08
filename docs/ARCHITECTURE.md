@@ -1,6 +1,6 @@
 # ARCHITECTURE.md
 
-Zigora is a Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pingora) HTTP reverse proxy framework. This doc maps Pingora's crate layout to Zigora's `lib/` sub-packages, defines the v0.1 surface, and governs build wiring. It is authoritative for module boundaries; `README.md` is the marketing-facing overview.
+Zigora is a Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pingora) HTTP reverse proxy framework. This doc maps Pingora's crate layout to Zigora's single-file `src/` packages, defines the v0.1 surface, and governs build wiring. It is authoritative for module boundaries; `README.md` is the marketing-facing overview.
 
 ---
 
@@ -8,21 +8,21 @@ Zigora is a Zig port of Cloudflare's [Pingora](https://github.com/cloudflare/pin
 
 | Pingora crate | Zigora package | v0.2 status |
 |---|---|---|
-| `pingora` (umbrella lib) | `src/root.zig` + `lib/root.zig` | Active |
-| `pingora-core` | `lib/zigora_core/` | **[v0.1]** Server, Service, Listeners — **[v0.1.1]** async via `io.async`/`Group.concurrent` |
-| `pingora-proxy` | `lib/zigora_proxy/` | **[v0.1]** ProxyHttp trait, Session, dispatch |
-| `pingora-http` | `lib/zigora_http/` | **[v0.1]** Request parser — **[v0.1.1]** `ResponseHeader`, `headersToH1Wire`, `HttpTask` |
-| `pingora-error` | `lib/zigora_error/` | **[v0.1]** Error struct + ErrorType |
-| `pingora-limits` | `lib/zigora_limits/` | **[v0.1.1]** `Estimator`, `Inflight`, `Rate` |
-| `pingora-lru` | `lib/zigora_lru/` | **[v0.1.1]** `Lru(T, N)` sharded weighted LRU |
-| `pingora-ketama` | `lib/zigora_ketama/` | **[v0.1.1]** `Continuum` consistent hash ring |
-| `pingora-pool` | `lib/zigora_pool/` | **[v0.1.1]** `ConnectionPool(S)` + `PoolNode(S)` |
-| `tinyufo` | `lib/zigora_tinyufo/` | **[v0.1.1]** `TinyUfo(T)` S3-FIFO + TinyLFU |
-| `pingora-load-balancing` | `lib/zigora_lb/` | v0.2 phase 2 |
-| `pingora-memory-cache` | (reserved) | v0.2 phase 2 — `lib/zigora_memory_cache/` |
-| `pingora-cache` | `lib/zigora_cache/` | v0.2 phase 2 |
-| `pingora-tls` (open/boringssl/rustls/s2n) | `lib/zigora_tls/` | v0.2 phase 3 |
-| `pingora-prometheus` | `lib/zigora_metrics/` | v0.2 phase 4 |
+| `pingora` (umbrella lib) | `src/root.zig` | Active |
+| `pingora-core` | `src/zigora_core.zig` | **[v0.1]** Server, Service, Listeners — **[v0.1.1]** async via `io.async`/`Group.concurrent` |
+| `pingora-proxy` | `src/zigora_proxy.zig` | **[v0.1]** ProxyHttp trait, Session, dispatch |
+| `pingora-http` | `src/zigora_http.zig` | **[v0.1]** Request parser — **[v0.1.1]** `ResponseHeader`, `headersToH1Wire`, `HttpTask` |
+| `pingora-error` | `src/zigora_error.zig` | **[v0.1]** Error struct + ErrorType |
+| `pingora-limits` | `src/zigora_limits.zig` | **[v0.1.1]** `Estimator`, `Inflight`, `Rate` |
+| `pingora-lru` | `src/zigora_lru.zig` | **[v0.1.1]** `Lru(T, N)` sharded weighted LRU |
+| `pingora-ketama` | `src/zigora_ketama.zig` | **[v0.1.1]** `Continuum` consistent hash ring |
+| `pingora-pool` | `src/zigora_pool.zig` | **[v0.1.1]** `ConnectionPool(S)` + `PoolNode(S)` |
+| `tinyufo` | `src/zigora_tinyufo.zig` | **[v0.1.1]** `TinyUfo(T)` S3-FIFO + TinyLFU |
+| `pingora-load-balancing` | `src/zigora_lb.zig` | v0.2 phase 2 |
+| `pingora-memory-cache` | (reserved) | v0.2 phase 2 — `src/zigora_memory_cache.zig` |
+| `pingora-cache` | `src/zigora_cache.zig` | v0.2 phase 2 |
+| `pingora-tls` (open/boringssl/rustls/s2n) | `src/zigora_tls.zig` | v0.2 phase 3 |
+| `pingora-prometheus` | `src/zigora_metrics.zig` | v0.2 phase 4 |
 | `pingora-timeout` | (none) | `std.Io.Timeout` covers it |
 | `pingora-runtime` | (none) | `std.Io` is the runtime |
 | `pingora-header-serde` | (none) | Deferred indefinitely |
@@ -57,13 +57,13 @@ zigora_http  → (nothing)
 zigora_error → (nothing — stdlib only)
 ```
 
-`src/main.zig` imports all four via `build.zig` named modules. `src/root.zig` re-exports the public surface for library consumers.
+`src/main.zig` imports the `zigora` module; every package imports its neighbours by relative path, and `src/root.zig` re-exports each as a namespace (`zigora.core`, `zigora.proxy`, …) for library consumers.
 
 ---
 
 ## 3. Package surface — v0.1 minimum (Pingora types to port)
 
-### `lib/zigora_core/`
+### `src/zigora_core.zig`
 
 Pingora counterparts: `pingora-core::Server`, `Service<A>`, `ServerConf`, `Listeners`, `apps::ServerApp`.
 
@@ -98,7 +98,7 @@ ServerApp trait {
 
 The current `server.zig` (`Server.start` / `Server.accept` / `Config`) maps to Pingora's `Service<A>` accept loop, not `Server` — it should be renamed and restructured before more code lands.
 
-### `lib/zigora_proxy/`
+### `src/zigora_proxy.zig`
 
 Pingora counterparts: `ProxyHttp` trait (30+ callbacks), `HttpProxy<SV,C>`, `Session`.
 
@@ -133,7 +133,7 @@ http_proxy(conf, impl) → HttpProxy
 
 The current `proxy.zig` (`dispatch(io, upstream, buf, writer)`) is a direct-splice function, not `ProxyHttp` — should be restructured into `ProxyHttp.upstream_peer` + `HttpProxy.process_new_http` before v0.2.
 
-### `lib/zigora_http/`
+### `src/zigora_http.zig`
 
 Pingora counterparts: `RequestHeader`, `ResponseHeader`, `CaseMap` (case-preserving header name map), `HttpTask`.
 
@@ -172,7 +172,7 @@ Version enum: HTTP10, HTTP11
 
 The current `root.zig` (`Request.parse`, `Header`, `Method` enum) is a good start — needs `ResponseHeader` to be added, and `CaseMap` deferred.
 
-### `lib/zigora_error/`
+### `src/zigora_error.zig`
 
 Pingora counterparts: `ErrorType` (40+ variants), `ErrorSource`, `RetryType`, `Context<T>`/`OrErr<T>`/`OkOrErr<T>` chaining traits.
 
@@ -247,7 +247,7 @@ v0.1 implements steps 1, 3-5 (passthrough), 7 (passthrough), 8 (single fixed bac
 
 ## 5. Module label convention
 
-On-disk directories use underscores (`zigora_core`). User-facing module labels in `build.zig` use hyphens (`zigora-core`). `@import("zigora-core")` refers to the module label, not the filesystem. `build.zig` `b.path()` calls must use the underscore form.
+On-disk files use underscores (`zigora_core.zig`). `build.zig` defines exactly two modules — the `zigora` library (root `src/root.zig`) and the `exe` (root `src/main.zig`) — and everything inside `src/` imports by relative path (`@import("zigora_http.zig")`). Relative imports propagate test blocks, so `zig build test` collects every package's tests (the old named-module wiring silently ran only root-file tests).
 
 ---
 
@@ -275,25 +275,26 @@ Plus `zig build && zig build test` exits 0.
 Full directory map for when they land:
 
 ```
-lib/
-├── zigora_core/          v0.1 — Server, Service, Listeners, HttpServerApp
-├── zigora_proxy/         v0.1 — ProxyHttp trait, HttpProxy, Session
-├── zigora_http/          v0.1 — RequestHeader, ResponseHeader, HeaderMap
-├── zigora_error/         v0.1 — Error, ErrorType, ErrorSource
-├── zigora_lb/            v0.2 — Backend, Backends, LoadBalancer, BackendSelection
-│   └── uses: zigora_ketama/ (consistent hash ring)
-├── zigora_cache/         v0.2 — HttpCache, CachePhase, Storage, HitHandler, MissHandler, EvictionManager
-│   ├── uses: zigora_lru/
-│   └── uses: zigora_memory_cache/ (→ uses: zigora_tinyufo/)
-├── zigora_limits/        v0.2 — Rate, Inflight, Estimator
-├── zigora_tls/           v0.2 — TLS accept/connect adapter
-├── zigora_pool/          v0.2 — ConnectionPool, PoolNode
-├── zigora_ketama/        v0.2 — Continuum (nginx-compatible consistent hashing)
-├── zigora_lru/           v0.2 — sharded weighted LRU
-├── zigora_memory_cache/  v0.2 — MemoryCache (TinyUFO-backed)
-├── zigora_tinyufo/       v0.2 — TinyUfo (S3-FIFO + TinyLFU cache algorithm)
-├── zigora_metrics/       v0.2 — Prometheus /metrics endpoint + Admin status page
-├── zigora_utils/         shared helpers (may stay minimal forever)
+src/
+├── zigora_core.zig       v0.1 — Server, Service, Listeners, HttpServerApp
+│   └── zigora_core/      listeners.zig / runtime.zig / server.zig / service.zig
+├── zigora_proxy.zig      v0.1 — ProxyHttp trait, HttpProxy, Session
+├── zigora_http.zig       v0.1 — RequestHeader, ResponseHeader, HeaderMap
+├── zigora_error.zig      v0.1 — Error, ErrorType, ErrorSource
+├── zigora_lb.zig         v0.2 — Backend, Backends, LoadBalancer, BackendSelection
+│   └── uses: zigora_ketama.zig (consistent hash ring)
+├── zigora_cache.zig      v0.2 — HttpCache, CachePhase, Storage, HitHandler, MissHandler, EvictionManager
+│   ├── uses: zigora_lru.zig
+│   └── uses: zigora_memory_cache.zig (→ uses: zigora_tinyufo.zig)
+├── zigora_limits.zig     v0.2 — Rate, Inflight, Estimator
+├── zigora_tls.zig        v0.2 — TLS accept/connect adapter
+├── zigora_pool.zig       v0.2 — ConnectionPool, PoolNode
+├── zigora_ketama.zig     v0.2 — Continuum (nginx-compatible consistent hashing)
+├── zigora_lru.zig        v0.2 — sharded weighted LRU
+├── zigora_memory_cache.zig  v0.2 — MemoryCache (TinyUFO-backed)
+├── zigora_tinyufo.zig    v0.2 — TinyUfo (S3-FIFO + TinyLFU cache algorithm)
+├── zigora_metrics.zig    v0.2 — Prometheus /metrics endpoint + Admin status page
+├── zigora_utils.zig      shared helpers (may stay minimal forever)
 └── root.zig              umbrella re-exports
 ```
 

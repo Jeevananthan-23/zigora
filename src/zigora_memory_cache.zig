@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.memory_cache);
-const tinyufo = @import("zigora-tinyufo");
+const tinyufo = @import("zigora_tinyufo.zig");
 const zgmemcache = @This();
 
 // ponytail: clock via global Io, not removed std.time.nanoTimestamp.
@@ -181,7 +181,8 @@ test "MemoryCache TTL expires" {
     const fresh = c.get("k");
     try std.testing.expectEqual(@as(?u32, 1), fresh.value);
     try std.testing.expectEqual(CacheStatus.hit, fresh.status);
-    std.time.sleep(10 * std.time.ns_per_ms);
+        const deadline = nanoTimestamp() + @as(i96, @intCast(10 * std.time.ns_per_ms));
+        while (nanoTimestamp() < deadline) {}
     const ex = c.get("k");
     try std.testing.expectEqual(@as(?u32, null), ex.value);
     try std.testing.expectEqual(CacheStatus.expired, ex.status);
@@ -192,12 +193,14 @@ test "MemoryCache getStale returns value with stale duration" {
     var c = try MemoryCache(u32).init(alc, 16);
     defer c.deinit();
     try c.put("k", 7, 5 * std.time.ns_per_ms);
-    std.time.sleep(10 * std.time.ns_per_ms);
+        const deadline = nanoTimestamp() + @as(i96, @intCast(10 * std.time.ns_per_ms));
+        while (nanoTimestamp() < deadline) {}
     const g = c.getStale("k");
     try std.testing.expectEqual(@as(?u32, 7), g.value);
-    try std.testing.expectEqual(@as(CacheStatus, .stale), g.status);
-    if (g.status == .stale) |d| {
-        try std.testing.expect(d > 0);
+    try std.testing.expect(g.status == .stale);
+    switch (g.status) {
+        .stale => |d| try std.testing.expect(d > 0),
+        else => {},
     }
 }
 
@@ -221,11 +224,11 @@ test "MemoryCache remove" {
 }
 
 test "CacheStatus.asStr / isHit" {
-    try std.testing.expectEqualStrings("hit", CacheStatus.hit.asStr());
-    try std.testing.expectEqualStrings("miss", CacheStatus.miss.asStr());
-    try std.testing.expect(CacheStatus.hit.isHit());
+    try std.testing.expectEqualStrings("hit", @as(CacheStatus, .hit).asStr());
+    try std.testing.expectEqualStrings("miss", @as(CacheStatus, .miss).asStr());
+    try std.testing.expect(@as(CacheStatus, .hit).isHit());
     try std.testing.expect((@as(CacheStatus, .{ .stale = 100 })).isHit());
-    try std.testing.expect(!CacheStatus.miss.isHit());
+    try std.testing.expect(!@as(CacheStatus, .miss).isHit());
 }
 
 // --- integration tests ---
@@ -252,7 +255,7 @@ test "integration: memory_cache evicts through TinyUfo when full" {
 
 test "integration: memory_cache forcePut bypasses TinyLFU admission" {
     const alc = std.testing.allocator;
-    var c = try MemoryCache(u32).init(alc, 10, 64);
+    var c = try MemoryCache(u32).init(alc, 10);
     defer c.deinit();
     // fill cache, repeatedly put same key to drive up TinyLFU frequency
     try c.put("popular", 1, null);
@@ -270,7 +273,8 @@ test "integration: memory_cache getStale returns stale_duration > 0" {
     var c = try MemoryCache(u32).init(alc, 16);
     defer c.deinit();
     try c.put("k", 7, 5 * std.time.ns_per_ms);
-    std.time.sleep(10 * std.time.ns_per_ms);
+        const deadline = nanoTimestamp() + @as(i96, @intCast(10 * std.time.ns_per_ms));
+        while (nanoTimestamp() < deadline) {}
     const g = c.getStale("k");
     try std.testing.expect(g.status.isHit());
     // stale variant carries the ns-since-expiry

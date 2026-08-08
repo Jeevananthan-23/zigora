@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.4.0-alpha8 — 2026-08-08 (unreleased)
+
+Layout restructure: every package is now a single file under `src/`
+(`src/zigora_http.zig`, etc.) imported by relative path; `lib/` is gone.
+`build.zig` collapses to two modules (`zigora` + `exe`); examples/benches
+import via the `zigora` module. Relative imports propagate test blocks, so
+`zig build test` now collects all ~87 tests (previously 19).
+
+### Changes
+
+- **restructure**: `lib/zigora_*/root.zig` → `src/zigora_*.zig` via `git mv`;
+  `zigora_core` sub-files → `src/zigora_core/`; `lib/root.zig` surface merged
+  into `src/root.zig` as package namespaces (`zigora.core`, `zigora.pool`, …)
+  plus flat aliases (`zigora.Server`). `lib/` deleted.
+- **build** (`build.zig`): single `zigora` module (root `src/root.zig`,
+  `.imports` empty — all imports relative) + `exe` (root `src/main.zig`,
+  imports `zigora`). Both test steps run in parallel under `zig build test`.
+- **build** (`build.zig.zon`): version `0.4.0-alpha8`, `.paths` = `build.zig,
+  build.zig.zon, src, stdx`.
+- **http** (`src/zigora_http.zig`): `Request`/`ResponseHeader` now own their
+  header storage (`header_buf: [32]Header` + `header_count`, `headers()`
+  accessor). Both `parse` functions previously returned a slice into a
+  stack-local array (dangling pointer — the proxy read dead stack in
+  `findHeader` at `src/zigora_proxy.zig:544`). Tests use the 0.16
+  `std.Io.Writer.fixed` API.
+- **proxy** (`src/zigora_proxy.zig`): test impl aligned with the v0.2 vtable
+  (`CTX = Ctx`, `upstream_peer` takes ctx).
+- **memory_cache** (`src/zigora_memory_cache.zig`): replaced removed
+  `std.time.sleep` with deadline spins on the module's `nanoTimestamp()`;
+  union-tag vs union-value test fixes.
+- **lb / ketama**: `std.hash.Fnv1a_64.init()` (0.16 API), `@intCast` fixes.
+
+### Notes
+
+- Test collection is the point of the restructure: the old named-module
+  wiring ran only root-file tests, silently skipping ~68 test blocks across
+  the packages — several held real bugs (see http above) that only surfaced
+  now. `zig build && zig build test` is green.
+
 ## v0.4.0-alpha7 — 2026-08-08
 
 Upstream connection pool liveness: `ConnectionPool` now hands back *live*

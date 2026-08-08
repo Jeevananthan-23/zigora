@@ -61,8 +61,8 @@ test "Listeners.addTcp parses host:port" {
     defer l.deinit(alc);
     try l.addTcp(alc, "127.0.0.1:8080");
     try std.testing.expectEqual(@as(usize, 1), l.addrs.items.len);
-    try std.testing.expectEqualStrings("127.0.0.1", l.addrs.items.items[0].Tcp.host);
-    try std.testing.expectEqual(@as(u16, 8080), l.addrs.items.items[0].Tcp.port);
+    try std.testing.expectEqualStrings("127.0.0.1", l.addrs.items[0].Tcp.host);
+    try std.testing.expectEqual(@as(u16, 8080), l.addrs.items[0].Tcp.port);
 }
 
 test "Listeners.addTcp rejects malformed" {
